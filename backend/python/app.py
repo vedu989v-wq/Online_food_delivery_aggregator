@@ -1,6 +1,17 @@
-import kagglehub
 
-# Download latest version
-path = kagglehub.dataset_download("rrkcoder/zomato-data-40k-restaurants-of-indias-100-cities")
+import pandas as pd
 
-print("Path to dataset files:", path)
+swiggy = pd.read_csv("backend/data/swiggy_file.csv")
+zomato = pd.read_csv("backend/data/zomato_dataset.csv")
+
+print("SWIGGY COLUMNS:")
+print(swiggy.columns.tolist())
+
+print("\nZOMATO COLUMNS:")
+print(zomato.columns.tolist())
+
+print("\nSWIGGY SAMPLE:")
+print(swiggy.head(2).to_string(index=False))
+
+print("\nZOMATO SAMPLE:")
+print(zomato.head(2).to_string(index=False))
