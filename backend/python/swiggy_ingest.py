@@ -3,8 +3,11 @@ import hashlib
 import pandas as pd
 from pathlib import Path
 
-INPUT_PATH = Path("backend/data/swiggy_validated.csv")
-OUTPUT_DIR = Path("backend/data")
+BASE_DIR = Path(__file__).resolve().parents[2]
+DATA_DIR = BASE_DIR / "backend" / "data"
+
+INPUT_PATH = DATA_DIR / "swiggy_validated.csv"
+OUTPUT_DIR = DATA_DIR
 
 # Change this to match your dataset's source.
 PROVIDER_ID = "swiggy"
