@@ -1,127 +1,166 @@
 
-import pandas as pd
 from pathlib import Path
-from rapidfuzz import fuzz
 import re
-import unicodedata
+import pandas as pd
+from rapidfuzz import fuzz, process
 
-# File paths
-DATA_DIR = Path("backend/data")
-INPUT_PATH = DATA_DIR / "swiggy.csv"
-OUTPUT_PATH = DATA_DIR / "swiggy_resolved.csv"
-REVIEW_PATH = DATA_DIR / "swiggy_needs_review.csv"
+BASE_DIR = Path(__file__).resolve().parents[2]
+DATA_DIR = BASE_DIR / "backend" / "data"
+
+INPUT_FILE = DATA_DIR / "swiggy_ingested.csv"
+OUTPUT_FILE = DATA_DIR / "swiggy_resolved.csv"
+REVIEW_FILE = DATA_DIR / "swiggy_needs_review.csv"
 
 
-def normalize_text(value):
-    """Normalize text for comparison without changing original values."""
+def normalize(value):
     if pd.isna(value):
         return ""
-
-    value = unicodedata.normalize("NFKC", str(value))
-    value = value.casefold()
+    value = str(value).lower().strip()
     value = re.sub(r"[^a-z0-9\s]", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
 
-    return " ".join(value.split())
+
+def find_column(df, aliases, required=True):
+    lookup = {
+        re.sub(r"[^a-z0-9]", "", str(col).lower()): col
+        for col in df.columns
+    }
+
+    for alias in aliases:
+        key = re.sub(r"[^a-z0-9]", "", alias.lower())
+        if key in lookup:
+            return lookup[key]
+
+    if required:
+        raise ValueError(
+            f"Missing column from {aliases}. Found: {df.columns.tolist()}"
+        )
+    return None
 
 
-# Load Swiggy dataset
-df = pd.read_csv(INPUT_PATH)
+def make_block_key(name):
+    tokens = name.split()
 
-required_columns = [
-    "Restaurant Name",
-    "Location",
-    "Area",
-    "Cuisine"
-]
+    if not tokens:
+        return ""
 
-missing = [col for col in required_columns if col not in df.columns]
+    # Handle names such as "La Pino'Z Pizza".
+    if len(tokens[0]) < 3 and len(tokens) > 1:
+        return (tokens[0] + tokens[1])[:3]
 
-if missing:
-    raise ValueError(f"Missing columns in Swiggy dataset: {missing}")
+    return tokens[0][:3]
 
-df = df.copy()
-df["provider_id"] = "swiggy"
-df["source_row_id"] = range(len(df))
 
-# Normalize fields for comparison
-df["normalized_name"] = df["Restaurant Name"].apply(normalize_text)
-df["normalized_location"] = df["Location"].apply(normalize_text)
-df["normalized_area"] = df["Area"].apply(normalize_text)
-df["normalized_cuisine"] = df["Cuisine"].apply(normalize_text)
+def main():
+    if not INPUT_FILE.exists():
+        raise FileNotFoundError(f"Input file not found: {INPUT_FILE}")
 
-# Records without a restaurant name need review
-missing_name = df["normalized_name"].eq("")
+    df = pd.read_csv(INPUT_FILE, encoding="utf-8-sig")
+    df.columns = df.columns.str.replace(
+        "\ufeff", "", regex=False
+    ).str.strip()
 
-df["identity_status"] = "unique_candidate"
-
-# Compare records within the same location
-for _, group in df.groupby("normalized_location"):
-    indices = group.index.tolist()
-
-    for i in range(len(indices)):
-        for j in range(i + 1, len(indices)):
-            a = df.loc[indices[i]]
-            b = df.loc[indices[j]]
-
-            # Compare restaurant names
-            name_score = fuzz.token_sort_ratio(
-                a["normalized_name"],
-                b["normalized_name"]
-            )
-
-            # Area provides additional branch-level evidence
-            area_score = fuzz.token_sort_ratio(
-                a["normalized_area"],
-                b["normalized_area"]
-            )
-
-            # Don't match records with missing names
-            if not a["normalized_name"] or not b["normalized_name"]:
-                continue
-
-            # Similar name and similar area: possible duplicate
-            if name_score >= 90 and area_score >= 80:
-                df.loc[indices[i], "identity_status"] = (
-                    "possible_duplicate"
-                )
-                df.loc[indices[j], "identity_status"] = (
-                    "possible_duplicate"
-                )
-
-            # Similar name but uncertain branch identity
-            elif name_score >= 80:
-                if df.loc[indices[i], "identity_status"] != (
-                    "possible_duplicate"
-                ):
-                    df.loc[indices[i], "identity_status"] = (
-                        "manual_review"
-                    )
-
-                if df.loc[indices[j], "identity_status"] != (
-                    "possible_duplicate"
-                ):
-                    df.loc[indices[j], "identity_status"] = (
-                        "manual_review"
-                    )
-
-df.loc[missing_name, "identity_status"] = "missing_name"
-
-# Save separate output files
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-df.to_csv(OUTPUT_PATH, index=False)
-
-review_df = df[
-    df["identity_status"].isin(
-        ["possible_duplicate", "manual_review", "missing_name"]
+    name_col = find_column(
+        df, ["Restaurant Name", "restaurant_name", "name"]
     )
-].copy()
+    location_col = find_column(
+        df, ["Location", "city", "normalized_location"]
+    )
+    area_col = find_column(
+        df, ["Area", "locality", "normalized_area"], required=False
+    )
 
-review_df.to_csv(REVIEW_PATH, index=False)
+    names = df[name_col].apply(normalize)
+    locations = df[location_col].apply(normalize)
+    areas = (
+        df[area_col].apply(normalize)
+        if area_col else pd.Series("", index=df.index)
+    )
 
-print("Provider: Swiggy")
-print("Total records:", len(df))
-print("\nIdentity status:")
-print(df["identity_status"].value_counts().to_string())
-print("\nResolved output:", OUTPUT_PATH)
-print("Review output:", REVIEW_PATH)
+    df["identity_status"] = "unique_candidate"
+    df.loc[names == "", "identity_status"] = "missing_name"
+    df.loc[
+        (names != "") & (locations == ""), "identity_status"
+    ] = "missing_location"
+
+    # Build small candidate groups instead of comparing every
+    # restaurant in a city against every other restaurant.
+    valid = (names != "") & (locations != "")
+    blocks = {}
+
+    for idx in df.index[valid]:
+        key = (locations.at[idx], make_block_key(names.at[idx]))
+        blocks.setdefault(key, []).append(idx)
+
+    comparisons = 0
+
+    for indices in blocks.values():
+        if len(indices) < 2:
+            continue
+
+        block_names = [names.at[idx] for idx in indices]
+
+        for i, name in enumerate(block_names):
+            candidates = process.extract(
+                name,
+                block_names,
+                scorer=fuzz.token_sort_ratio,
+                limit=10,
+                score_cutoff=80
+            )
+
+            for _, name_score, j in candidates:
+                if j <= i:
+                    continue
+
+                idx1, idx2 = indices[i], indices[j]
+                comparisons += 1
+
+                area1, area2 = areas.at[idx1], areas.at[idx2]
+                area_score = (
+                    fuzz.token_sort_ratio(area1, area2)
+                    if area1 and area2 else None
+                )
+
+                if name_score >= 95 and (
+                    area_score is None or area_score >= 80
+                ):
+                    status = "possible_duplicate"
+                elif name_score >= 80:
+                    status = "manual_review"
+                else:
+                    continue
+
+                for idx in (idx1, idx2):
+                    current = df.at[idx, "identity_status"]
+
+                    if current in ("missing_name", "missing_location"):
+                        continue
+
+                    if (
+                        status == "possible_duplicate"
+                        or current == "unique_candidate"
+                    ):
+                        df.at[idx, "identity_status"] = status
+
+    df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
+
+    review_df = df[
+        df["identity_status"].isin([
+            "possible_duplicate",
+            "manual_review",
+            "missing_name",
+            "missing_location"
+        ])
+    ]
+    review_df.to_csv(REVIEW_FILE, index=False, encoding="utf-8-sig")
+
+    print(f"Swiggy records: {len(df)}")
+    print(f"Candidate comparisons: {comparisons}")
+    print(f"Resolved: {OUTPUT_FILE}")
+    print(f"Needs review: {REVIEW_FILE}")
+    print(df["identity_status"].value_counts())
+
+
+if __name__ == "__main__":
+    main()
