@@ -2,8 +2,11 @@
 import pandas as pd
 from pathlib import Path
 
-INPUT_PATH = Path("backend/data/zomato_normalised.csv")
-OUTPUT_DIR = Path("backend/data")
+BASE_DIR = Path(__file__).resolve().parents[2]
+DATA_DIR = BASE_DIR / "backend" / "data"
+
+INPUT_PATH = DATA_DIR / "zomato_normalised.csv"
+OUTPUT_DIR = DATA_DIR
 
 df = pd.read_csv(INPUT_PATH)
 
