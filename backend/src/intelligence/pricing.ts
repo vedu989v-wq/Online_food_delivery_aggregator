@@ -1,35 +1,22 @@
-import type { CanonicalRestaurant } from '../pipeline/reconcile';
-import type { Listing } from '../types';
-import { round2 } from '../pipeline/text';
-
-export const FOOD_GST = 0.05, FEE_GST = 0.18; // ASSUMED rates, labelled as assumptions in every response
-export interface Selection { itemId: string; qty: number }
-
-export function priceBasket(r: CanonicalRestaurant, l: Listing, sel: Selection[]) {
-  const missing: string[] = []; let subtotal = 0;
-  for (const s of sel) {
-    const item = r.items.find(i => i.id === s.itemId);
-    const offer = item?.offers.find(o => o.providerId === l.providerId);
-    if (!item || !offer || !offer.available || offer.price == null) { missing.push(item?.name ?? s.itemId); continue; }
-    subtotal += offer.price * s.qty;
+import type { Listing, MenuItem } from "../types.js";
+export interface Selection { itemId: string; quantity: number; }
+export function priceBasket(listing: Listing, selections: Selection[]) {
+  const missing: string[] = [], lines: Array<{itemId:string;name:string;quantity:number;unitPrice:number;lineTotal:number}> = [];
+  for (const selection of selections) {
+    const item=listing.menu.find(m=>m.id===selection.itemId);
+    if (!item || !item.available || item.price===null) { missing.push(item?.name ?? selection.itemId); continue; }
+    lines.push({itemId:item.id,name:item.name,quantity:selection.quantity,unitPrice:item.price,lineTotal:item.price*selection.quantity});
   }
-  if (missing.length) return { providerId: l.providerId, available: false as const, missing, total: null, verified: false as const };
-
-  const unknowns: string[] = [];
-  if (l.deliveryFee == null) unknowns.push('delivery fee');
-  if (l.platformFee == null) unknowns.push('platform fee');
-  const delivery = l.deliveryFee ?? 0, platform = l.platformFee ?? 0; // unknown contributes 0 to the SUM only; flagged below, total becomes "at least"
-  const o = l.offer;
-  const discount = o && subtotal >= o.minOrder ? Math.min(o.cap, round2(subtotal * o.pct / 100)) : 0;
-  const foodTax = round2(subtotal * FOOD_GST), feeTax = round2((delivery + platform) * FEE_GST);
-  return {
-    providerId: l.providerId, available: true as const, missing: [] as string[],
-    subtotal: round2(subtotal), foodTax, deliveryFee: l.deliveryFee, platformFee: l.platformFee, feeTax, discount,
-    discountNote: o ? (discount ? `${o.label} applied` : `${o.label} (not met: add ₹${round2(o.minOrder - subtotal)} more)`) : null,
-    total: round2(subtotal + foodTax + delivery + platform + feeTax - discount),
-    isLowerBound: unknowns.length > 0, unknowns,
-    verified: false as const, // flips to true ONLY if an official integration confirms the checkout total
-    assumptions: [`Food GST assumed ${FOOD_GST * 100}%`, `GST on fees assumed ${FEE_GST * 100}%`, 'Estimate from listing data, not a verified checkout total'],
-  };
+  if (missing.length) return { providerId:listing.providerId,available:false,missingItems:missing,lines,subtotal:null,total:null,unknownFees:[],isLowerBound:false,verified:false };
+  const subtotal=lines.reduce((s,l)=>s+l.lineTotal,0);
+  const foodGst=subtotal*.05, unknownFees:string[]=[];
+  const delivery=listing.deliveryFee, platform=listing.platformFee;
+  if (delivery===null) unknownFees.push("delivery fee"); if (platform===null) unknownFees.push("platform fee");
+  const knownDelivery=delivery??0, knownPlatform=platform??0;
+  const eligibleOffer=listing.offer && subtotal>=listing.offer.minOrder ? Math.min(listing.offer.cap,subtotal*listing.offer.percent/100) : 0;
+  const gstOnFees=(knownDelivery+knownPlatform)*.18;
+  const total=subtotal+foodGst+knownDelivery+knownPlatform+gstOnFees-eligibleOffer;
+  return {providerId:listing.providerId,available:true,lines,subtotal,foodGst,deliveryFee:delivery,platformFee:platform,gstOnFees,discount:eligibleOffer,
+    amountToOfferMinimum:listing.offer?Math.max(0,listing.offer.minOrder-subtotal):0,total,unknownFees,isLowerBound:unknownFees.length>0,verified:false,
+    disclaimer:"Estimate only. Assumes 5% GST on food and 18% GST on fees; discounts are simplified. Not a checkout quote."};
 }
-export type Pricing = ReturnType<typeof priceBasket>;

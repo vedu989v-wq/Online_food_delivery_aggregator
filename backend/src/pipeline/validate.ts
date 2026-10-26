@@ -1,22 +1,18 @@
-import type { Listing, RawListing } from '../types';
-
-export interface Issue { providerId: string; recordId: string; level: 'listing' | 'item' | 'field'; reason: string }
-
-/** Rejects unusable records, nulls out impossible fields. Never silently turns "bad" into 0. */
-export function validate(raw: RawListing[]): { valid: Listing[]; issues: Issue[] } {
-  const valid: Listing[] = [], issues: Issue[] = [];
-  for (const r of raw) {
-    const bad = (level: Issue['level'], reason: string) => issues.push({ providerId: r.providerId, recordId: r.recordId, level, reason });
-    if (!r.name?.trim()) { bad('listing', 'missing name'); continue; }
-    if (!(Math.abs(r.lat) <= 90 && Math.abs(r.lng) <= 180)) { bad('listing', `invalid coordinates (${r.lat}, ${r.lng})`); continue; }
-    const l: Listing = { ...r, id: `${r.providerId}:${r.recordId}` };
-    if (l.rating != null && !(l.rating >= 0 && l.rating <= 5)) { bad('field', `rating ${l.rating} out of range -> unknown`); l.rating = null; }
-    if (l.etaMin != null && !(l.etaMin > 0 && l.etaMin < 300)) { bad('field', `eta ${l.etaMin} implausible -> unknown`); l.etaMin = null; }
-    l.menu = l.menu.filter(it => {
-      if (it.price == null || it.price > 0) return true; // null stays "unknown"
-      bad('item', `"${it.name}" has non-positive price ${it.price}, dropped`); return false;
-    });
-    valid.push(l);
+import type { RawListing, Listing, PipelineIssue } from "../types.js";
+export function validateListing(raw: RawListing, issues: PipelineIssue[]): Listing | null {
+  const issue = (level: "warn" | "error", reason: string) => issues.push({ providerId: raw.providerId, recordId: raw.recordId, level, reason });
+  if (!raw.name?.trim()) { issue("error", "Missing restaurant name"); return null; }
+  if ((raw.lat !== null && (raw.lat < -90 || raw.lat > 90)) || (raw.lng !== null && (raw.lng < -180 || raw.lng > 180))) {
+    issue("error", "Coordinates outside valid range"); return null;
   }
-  return { valid, issues };
+  if (raw.rating !== null && (raw.rating < 0 || raw.rating > 5)) { raw.rating = null; issue("warn", "Invalid rating set to unknown"); }
+  if (raw.etaMinutes !== null && (raw.etaMinutes <= 0 || raw.etaMinutes >= 300)) { raw.etaMinutes = null; issue("warn", "Invalid ETA set to unknown"); }
+  raw.menu = raw.menu.filter(item => {
+    if (item.price === null) return true;
+    if (item.price <= 0) { issue("warn", `Dropped non-positive price for ${item.name}`); return false; }
+    return true;
+  });
+  const age = Math.max(0, Date.now() - new Date(raw.fetchedAt).getTime()) / 60000;
+  const freshness = age <= 30 ? "fresh" : age <= 180 ? "aging" : "stale";
+  return { ...raw, id: `${raw.providerId}:${raw.recordId}`, freshness };
 }
