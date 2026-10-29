@@ -71,6 +71,18 @@ def test_search_paginates_and_validates_filters(client):
     assert client.get("/api/search", params={"pageSize": 51}).status_code == 400
 
 
+def test_search_supports_city_and_area_filters(client):
+    all_results = client.get("/api/search", params={"pageSize": 50}).json()
+    assert all_results["total"] > 0
+    sample_city = "Bengaluru"
+    city_results = client.get("/api/search", params={"city": sample_city, "pageSize": 50}).json()
+    assert city_results["total"] > 0
+    first_area = city_results["results"][0]["area"]
+    area_results = client.get("/api/search", params={"city": sample_city, "area": first_area, "pageSize": 50}).json()
+    assert area_results["total"] > 0
+    assert area_results["total"] <= city_results["total"]
+
+
 def test_data_endpoints_return_service_unavailable_when_required_csv_is_missing(client, monkeypatch):
     missing_root = BACKEND_DIR / "missing_data_test_root"
     monkeypatch.setattr(main, "SCRIPT_DIR", str(missing_root))
@@ -175,6 +187,20 @@ def test_recommendations_are_ranked_from_available_csv_menu_rows(client):
 def test_recommendations_reject_unknown_priority(client):
     response = client.get("/api/intelligence/recommendations", params={"priority": "random"})
     assert response.status_code == 400
+
+
+def test_recommendations_reject_malformed_behavior_signals(client):
+    for value in ("{}", '[{"cuisine":"South Indian","count":"bad"}]'):
+        response = client.get("/api/intelligence/recommendations", params={"behaviorSignals": value})
+        assert response.status_code == 400
+
+
+def test_recommendations_use_supported_city_location(client):
+    response = client.get("/api/intelligence/recommendations", params={"city": "Bengaluru", "limit": 50})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["filters"]["city"] == "Bengaluru"
+    assert all(any("Bengaluru" in reason for reason in row["reasons"]) for row in body["recommendations"])
 
 
 def test_compare_rejects_unknown_priority(client):

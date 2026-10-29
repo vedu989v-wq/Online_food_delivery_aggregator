@@ -1,7 +1,11 @@
 import express, { type Request, type Response } from "express";
 import cors from "cors";
+import { authAllowedOrigins, authRouter, authenticate, requireAdmin } from "./auth-routes.js";
+import { customerRouter } from "./customer-routes.js";
+import { databaseConfigured } from "./db.js";
 
 const app = express();
+app.set("trust proxy", 1);
 const port = Number(process.env.PORT) || 4000;
 const host = process.env.HOST || "127.0.0.1";
 const pythonApiBase = (process.env.PYTHON_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
@@ -11,13 +15,27 @@ const adminMutationsEnabled = process.env.NODE_ENV !== "production"
   && process.env.ADMIN_DEMO_MODE === "true"
   && localBind;
 
-app.use(cors({ origin: process.env.CORS_ORIGIN?.split(",").map(value => value.trim()) ?? ["http://localhost:5173", "http://127.0.0.1:5173"] }));
+const allowedOrigins = authAllowedOrigins();
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(null, false);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["content-type", "x-csrf-token"],
+  maxAge: 600,
+}));
 app.use(express.json({ limit: "1mb" }));
 app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   next();
 });
+
+app.use("/api/auth", authRouter);
+app.use("/api/customer", customerRouter);
+app.use("/api/admin", authenticate, requireAdmin);
 
 async function proxyPython(req: Request, res: Response, endpoint: string, method: "GET" | "POST" = "GET") {
   const target = new URL(endpoint, `${pythonApiBase}/`);
@@ -55,12 +73,12 @@ async function proxyPython(req: Request, res: Response, endpoint: string, method
 app.get("/", (_req, res) => res.json({ name: "FoodLens API", docs: "See README.md", health: "/api/health" }));
 
 app.get("/api/health", async (req, res) => {
-  const localHealth = { express: "ok", python: "unavailable", status: "degraded" };
+  const localHealth = { express: "ok", python: "unavailable", accounts: databaseConfigured() ? "configured" : "unconfigured", status: "degraded" };
   try {
     const response = await fetch(`${pythonApiBase}/api/health`, { signal: AbortSignal.timeout(3_000) });
     if (!response.ok) return res.status(503).json(localHealth);
     const body = await response.json() as { status?: string };
-    return res.status(200).json({ express: "ok", python: body.status === "ok" ? "ok" : "degraded", status: body.status === "ok" ? "ok" : "degraded" });
+    return res.status(200).json({ express: "ok", python: body.status === "ok" ? "ok" : "degraded", accounts: databaseConfigured() ? "configured" : "unconfigured", status: body.status === "ok" ? "ok" : "degraded" });
   } catch {
     return res.status(503).json(localHealth);
   }

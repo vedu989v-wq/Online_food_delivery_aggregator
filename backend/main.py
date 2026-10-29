@@ -2,6 +2,7 @@ import os
 import math
 import re
 import sys
+import json
 from datetime import datetime, timezone
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Body
@@ -453,17 +454,26 @@ def get_meta():
     cuisines = sorted({part.strip() for value in cuisine_values for part in value.split(",") if part.strip()})
     synthetic_values = df.get("is_synthetic_prov", pd.Series([True]))
     synthetic = all(_boolean(value, True) for value in synthetic_values)
+    provider_path = os.path.join(SCRIPT_DIR, "data", "provider_restaurants.csv")
+    try:
+        locations = pd.read_csv(provider_path).fillna("")
+        cities = sorted({str(value).strip() for value in locations.get("city", pd.Series(dtype=str)).tolist() if str(value).strip()})
+        areas = sorted({str(value).strip() for value in locations.get("locality", pd.Series(dtype=str)).tolist() if str(value).strip()})
+    except Exception:
+        cities, areas = [], []
     
     return {
         "dataMode": "synthetic" if synthetic else "mixed",
         "notice": "Synthetic demonstration data only. Provider prices, availability, fees, and ratings are not live or verified.",
         "providers": providers,
         "cuisines": cuisines,
+        "cities": cities,
+        "areas": areas,
         "adminDemoEnabled": demo_admin_enabled(),
     }
 
 @app.get("/api/search")
-def search_restaurants(q: str = "", cuisine: str = "", provider: str = "", city: str = "", limit: int = 100,
+def search_restaurants(q: str = "", cuisine: str = "", provider: str = "", city: str = "", area: str = "", limit: int = 100,
                       page: int = 1, pageSize: int | None = None, minRating: float | None = None, maxEta: float | None = None):
     """Return the canonical search-card contract consumed by the React app."""
     if page < 1:
@@ -484,6 +494,7 @@ def search_restaurants(q: str = "", cuisine: str = "", provider: str = "", city:
     cuisine_text = cuisine.strip().casefold()
     provider_text = provider.strip().casefold()
     city_text = city.strip().casefold()
+    area_text = area.strip().casefold()
     if not menus.empty:
         menus["normalized_item_name"] = menus.get("normalized_item_name", menus["item_name"]).fillna("").astype(str)
 
@@ -523,6 +534,12 @@ def search_restaurants(q: str = "", cuisine: str = "", provider: str = "", city:
             if city_column in group.columns:
                 cities.extend(group[city_column].dropna().astype(str).tolist())
         if city_text and city_text not in " ".join(cities).casefold() and city_text not in str(area).casefold():
+            continue
+        localities = []
+        for locality_column in ("locality_canon", "locality_prov"):
+            if locality_column in group.columns:
+                localities.extend(group[locality_column].dropna().astype(str).tolist())
+        if area_text and not any(area_text in locality.casefold() for locality in localities):
             continue
 
         providers = []
@@ -589,6 +606,9 @@ def get_intelligent_recommendations(
     vegetarian: bool | None = None,
     cuisine: str = "",
     priority: str = "value",
+    city: str = "",
+    area: str = "",
+    behaviorSignals: str = "",
 ):
     """Rank real CSV menu offers using request preferences and explain each result."""
     if not 1 <= limit <= 50:
@@ -622,6 +642,26 @@ def get_intelligent_recommendations(
     providers["_group_id"] = providers["canonical_restaurant_id"].where(providers["canonical_restaurant_id"].notna(), providers["listing_id"])
     budget_total = budgetPerPerson * people if budgetPerPerson is not None else None
     cuisine_query = cuisine.strip().casefold()
+    city_query = city.strip().casefold()
+    area_query = area.strip().casefold()
+    requested_area = area.strip()
+    try:
+        parsed_signals = json.loads(behaviorSignals) if behaviorSignals else []
+        if not isinstance(parsed_signals, list):
+            raise ValueError("expected a list")
+        behavior_signals = {}
+        for item in parsed_signals:
+            if not isinstance(item, dict) or not item.get("cuisine"):
+                raise ValueError("invalid signal")
+            count = int(item.get("count", 0))
+            if count < 0:
+                raise ValueError("invalid count")
+            if count >= 3:
+                behavior_signals[str(item["cuisine"]).strip().casefold()] = count
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="behaviorSignals must be a valid list of consented cuisine counts.")
+    if len(parsed_signals) > 12 or len(behavior_signals) > 12:
+        raise HTTPException(status_code=400, detail="Too many behavior signals were supplied.")
     candidates = []
     canonical_rows = canonical.set_index("canonical_restaurant_id", drop=False) if "canonical_restaurant_id" in canonical.columns else pd.DataFrame()
 
@@ -634,6 +674,16 @@ def get_intelligent_recommendations(
         cuisine_source = canonical_row.get("canonical_cuisine") if canonical_row is not None else first.get("cuisines")
         cuisines = sorted({part.strip() for value in ([cuisine_source] if isinstance(cuisine_source, str) else restaurant_listings.get("cuisines", pd.Series(dtype=str)).dropna().astype(str)) for part in str(value).split(",") if part.strip()})
         area = (_text(canonical_row.get("locality")) or _text(canonical_row.get("city"))) if canonical_row is not None else (_text(first.get("locality")) or _text(first.get("city")))
+        city_values = restaurant_listings.get("city", pd.Series(dtype=str)).dropna().astype(str).tolist()
+        if canonical_row is not None:
+            city_values.append(_text(canonical_row.get("city")))
+        locality_values = restaurant_listings.get("locality", pd.Series(dtype=str)).dropna().astype(str).tolist()
+        if canonical_row is not None:
+            locality_values.append(_text(canonical_row.get("locality")))
+        if city_query and not any(city_query in value.casefold() for value in city_values):
+            continue
+        if area_query and not any(area_query in value.casefold() for value in locality_values):
+            continue
         if cuisine_query and not any(cuisine_query in value.casefold() for value in cuisines):
             continue
 
@@ -691,6 +741,8 @@ def get_intelligent_recommendations(
                 "ratingCount": int(rating_count),
                 "reliability": reliability,
                 "reliabilityMentions": len(delivery),
+                "behaviorCuisineCount": max((count for signal_cuisine, count in behavior_signals.items()
+                    if any(signal_cuisine in value.casefold() or value.casefold() in signal_cuisine for value in cuisines)), default=0),
             })
 
     if not candidates:
@@ -713,12 +765,19 @@ def get_intelligent_recommendations(
         row["factors"] = [{"factor": name, "weight": weights[name], "value": round(values[name], 3), "known": known[name]} for name in weights]
         freshness_penalty = {"fresh": 0.0, "aging": 0.02, "stale": 0.06}[row["freshness"]["status"]]
         row["score"] = round(max(0.0, min(100.0, (sum(weights[name] * values[name] for name in weights) - freshness_penalty) * 100)), 2)
+        behavior_count = row["behaviorCuisineCount"]
+        behavior_bonus = min(0.05, behavior_count * 0.01) if behavior_count >= 3 else 0.0
+        row["score"] = round(min(100.0, row["score"] + behavior_bonus * 100), 2)
         row["reasons"] = [
             f"Listed item price × quantity {people} (one item per person): ₹{row['estimatedSubtotal']:.2f}, before taxes and fees.",
             f"Reported delivery estimate: {row['etaMin']:g} minutes." if row["etaMin"] is not None else "Delivery estimate is unavailable.",
             f"Adjusted provider rating: {row['rating']:.2f}/5 from {row['ratingCount']} ratings." if row["rating"] is not None else "Provider rating is unavailable.",
             f"Delivery feedback: {row['reliability']:.0%} positive across {row['reliabilityMentions']} labeled reviews." if row["reliability"] is not None else "Fewer than 3 labeled delivery reviews; reliability is treated as unknown.",
             f"Freshness penalty applied: {freshness_penalty:.0%}." if freshness_penalty else "No freshness penalty applied.",
+            *( [f"Matches your selected cuisine preference: {cuisine_query}."] if cuisine_query else [] ),
+            *( [f"Matches your selected city: {city.strip()}."] if city_query else [] ),
+            *( [f"Matches your selected area: {requested_area}."] if area_query else [] ),
+            *( [f"Small behavior bonus from {behavior_count} consented interactions matching these cuisines."] if behavior_bonus else [] ),
         ]
 
     candidates.sort(key=lambda row: (-row["score"], row["estimatedSubtotal"], row["restaurantName"].casefold(), row["itemName"].casefold()))
@@ -730,13 +789,14 @@ def get_intelligent_recommendations(
         seen_restaurants.add(row["restaurantId"])
         row.pop("reliability")
         row.pop("reliabilityMentions")
+        row.pop("behaviorCuisineCount")
         recommendations.append(row)
         if len(recommendations) >= limit:
             break
     return {
         "total": len(candidates), "recommendations": recommendations, "priority": priority,
         "weights": weights,
-        "filters": {"budgetPerPerson": budgetPerPerson, "people": people, "vegetarian": vegetarian, "cuisine": cuisine},
+        "filters": {"budgetPerPerson": budgetPerPerson, "people": people, "vegetarian": vegetarian, "cuisine": cuisine, "city": city, "area": requested_area},
         "disclaimer": "Synthetic CSV menu data. Subtotals use listed item prices only; taxes, delivery/platform fees, discounts, and checkout totals are not included.",
     }
 
