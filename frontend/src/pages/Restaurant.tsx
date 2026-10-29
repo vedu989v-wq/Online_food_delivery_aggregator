@@ -1,14 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { api, inr } from '../api';
 import type { Compare, Detail, Priority } from '../types';
 import { ProviderCard } from '../components/ProviderCard';
 import { ReputationPanel } from '../components/ReputationPanel';
 import { SourcesPanel } from '../components/SourcesPanel';
+import { useAuth } from '../AuthContext';
 
 const PRIORITIES: [Priority, string][] = [['value', 'Best value'], ['cheapest', 'Cheapest'], ['fastest', 'Fastest'], ['reliable', 'Most reliable'], ['rated', 'Best rated']];
 
 export default function Restaurant() {
+  const { user } = useAuth();
   const { id } = useParams();
   const [searchParams] = useSearchParams();
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -21,6 +23,10 @@ export default function Restaurant() {
   const [compare, setCompare] = useState<Compare | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<'compare' | 'reputation' | 'sources'>('compare');
+  const [saved, setSaved] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const recordedViews = useRef(new Set<string>());
 
   useEffect(() => {
     setDetail(null);
@@ -35,6 +41,21 @@ export default function Restaurant() {
       setQty(item ? { [item.id]: quantity } : {});
     }).catch(error => setDetailErr(error instanceof Error ? error.message : 'Could not load this restaurant.'));
   }, [id, searchParams, detailRetry]);
+
+  useEffect(() => {
+    if (!detail || !user) { setSaved(false); return; }
+    let cancelled = false;
+    api<{ restaurants: Array<{ id: string }> }>('/customer/saved-restaurants').then(result => {
+      if (!cancelled) setSaved(result.restaurants.some(item => item.id === detail.id));
+    }).catch(() => { if (!cancelled) setSaved(false); });
+    return () => { cancelled = true; };
+  }, [detail?.id, user?.id]);
+
+  useEffect(() => {
+    if (!detail || !user?.profile.interactionConsent || recordedViews.current.has(detail.id)) return;
+    recordedViews.current.add(detail.id);
+    api('/customer/interactions', { method: 'POST', body: JSON.stringify({ eventType: 'restaurant_viewed', restaurantId: detail.id, cuisine: detail.cuisines[0] }) }).catch(() => undefined);
+  }, [detail?.id, user?.id, user?.profile.interactionConsent]);
 
   useEffect(() => {
     if (!detail) return;
@@ -57,9 +78,22 @@ export default function Restaurant() {
   if (!detail) return <div className="state">Loading restaurant…</div>;
   const setItemQuantity = (itemId: string, quantity: number) => setQty(current => ({ ...current, [itemId]: Math.max(0, Math.min(20, quantity)) }));
 
+  async function toggleSaved() {
+    if (!user || !detail) return;
+    setSaveBusy(true);
+    setSaveError('');
+    try {
+      if (saved) await api<void>(`/customer/saved-restaurants/${encodeURIComponent(detail.id)}`, { method: 'DELETE' });
+      else await api(`/customer/saved-restaurants`, { method: 'POST', body: JSON.stringify({ restaurantId: detail.id }) });
+      setSaved(!saved);
+    } catch (error) { setSaveError(error instanceof Error ? error.message : 'Could not update saved restaurants.'); }
+    finally { setSaveBusy(false); }
+  }
+
   return (
     <>
-      <div className="rhead"><h1>{detail.name}</h1><p className="muted">{detail.area} · {detail.cuisines.join(', ')}{detail.phone ? ` · ${detail.phone}` : ''} · listed on {detail.listings.length} provider(s)</p></div>
+      <div className="rhead row between wrap"><div><h1>{detail.name}</h1><p className="muted">{detail.area} · {detail.cuisines.join(', ')}{detail.phone ? ` · ${detail.phone}` : ''} · listed on {detail.listings.length} provider(s)</p></div>{user && <button className="btn ghost" onClick={toggleSaved} disabled={saveBusy} aria-pressed={saved}>{saveBusy ? 'Saving…' : saved ? 'Saved ★' : 'Save restaurant ☆'}</button>}</div>
+      {saveError && <div className="state error" role="alert">{saveError}</div>}
       <div className="tabs" role="tablist">{(['compare', 'reputation', 'sources'] as const).map(item => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? 'on' : ''} onClick={() => setTab(item)}>{{ compare: 'Compare prices', reputation: 'Reputation', sources: 'Sources & freshness' }[item]}</button>)}</div>
       {tab === 'reputation' && <ReputationPanel d={detail} />}
       {tab === 'sources' && <SourcesPanel d={detail} />}

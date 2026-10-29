@@ -3,10 +3,12 @@ import { Link } from 'react-router-dom';
 import { api, inr } from '../api';
 import type { SearchResult } from '../types';
 import { FreshPill } from '../components/FreshPill';
+import { useAuth } from '../AuthContext';
 
 const CUISINES = ['Biryani', 'Pizza', 'Mughlai', 'Italian'];
 
 export default function Search() {
+  const { user } = useAuth();
   const [q, setQ] = useState('');
   const [cuisine, setCuisine] = useState('');
   const [page, setPage] = useState(1);
@@ -19,20 +21,31 @@ export default function Search() {
     const timer = window.setTimeout(() => {
       setRes(null);
       setErr('');
-      api<{ results: SearchResult[]; total: number }>(`/search?q=${encodeURIComponent(q)}&cuisine=${encodeURIComponent(cuisine)}&page=${page}&pageSize=20`)
+      const location = user?.profile.city ? `&city=${encodeURIComponent(user.profile.city)}&area=${encodeURIComponent(user.profile.area ?? '')}` : '';
+      api<{ results: SearchResult[]; total: number }>(`/search?q=${encodeURIComponent(q)}&cuisine=${encodeURIComponent(cuisine)}${location}&page=${page}&pageSize=20`)
         .then(data => { if (!cancelled) { setRes(data.results); setTotal(data.total); } })
         .catch(error => { if (!cancelled) setErr(error instanceof Error ? error.message : 'Search failed.'); });
     }, 250);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [q, cuisine, page]);
+  }, [q, cuisine, page, user?.profile.city, user?.profile.area]);
+
+  function selectCuisine(item: string) {
+    const next = cuisine === item ? '' : item;
+    setCuisine(next);
+    setPage(1);
+    if (next && user?.profile.interactionConsent) {
+      void api('/customer/interactions', { method: 'POST', body: JSON.stringify({ eventType: 'filter_selected', cuisine: next }) }).catch(() => undefined);
+    }
+  }
 
   return (
     <>
       <section className="hero">
-        <h1>One restaurant. Every provider. The real total.</h1>
-        <p>Search a dish or restaurant and see what each delivery app would actually charge, how fast, and how reliable.</p>
+        <h1>Compare a basket with the available evidence.</h1>
+        <p>Search synthetic restaurant and menu records, compare listed item estimates, and see where fees, freshness, or reliability evidence are unknown.</p>
+        {user?.profile.city && <p className="demo-pill">Location filter: {user.profile.area ? `${user.profile.area}, ` : ''}{user.profile.city} · change it in your dashboard</p>}
         <input className="searchbox" placeholder="Try “biryani” or “pizza palace”" value={q} onChange={event => { setQ(event.target.value); setPage(1); }} aria-label="Search restaurants and dishes" />
-        <div className="chips">{CUISINES.map(item => <button key={item} className={'chip' + (cuisine === item ? ' on' : '')} onClick={() => { setCuisine(cuisine === item ? '' : item); setPage(1); }}>{item}</button>)}</div>
+        <div className="chips">{CUISINES.map(item => <button key={item} className={'chip' + (cuisine === item ? ' on' : '')} onClick={() => selectCuisine(item)}>{item}</button>)}</div>
       </section>
       {err && <div className="state error">{err}</div>}
       {!err && res === null && <div className="state">Searching…</div>}

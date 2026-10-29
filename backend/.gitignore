@@ -4,3 +4,5 @@ dist/
 *.log
 __pycache__/
 .venv/
+.python-deps/
+.pip-tmp/
