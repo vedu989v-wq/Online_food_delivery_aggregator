@@ -191,6 +191,34 @@ details { margin:.6rem 0; } summary { cursor:pointer; color:var(--leaf-d); font-
 .cart-item strong { min-width:4rem; text-align:right; }
 .item-check { color:var(--leaf); }
 .icon-btn { border:0; background:transparent; color:var(--muted); font-size:1.4rem; cursor:pointer; }
+.friend-demo-card { margin:1.5rem 0 2rem; border-color:#b7d9cc; box-shadow:0 12px 35px #10242b0b; }
+.friend-demo-step { padding:1.1rem 0; border-top:1px solid var(--line); }
+.friend-demo-step > label { display:grid; gap:.4rem; max-width:760px; font-weight:650; }
+.friend-demo-results,.friend-demo-friends,.friend-demo-orders { display:grid; gap:.7rem; margin-top:.8rem; }
+.friend-demo-results { grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }
+.friend-demo-restaurant,.friend-demo-friend,.friend-demo-order,.friend-demo-qr-card { display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:1rem; border:1px solid var(--line); border-radius:14px; background:#fff; }
+.friend-demo-friend > div:first-child { display:grid; gap:.35rem; }
+.friend-active { display:flex; align-items:center; gap:.4rem; color:var(--leaf-d); font-size:.82rem; }
+.friend-active i { width:.5rem; height:.5rem; border-radius:50%; background:#21a477; box-shadow:0 0 0 3px #21a47722; }
+.friend-otp-row { display:flex; flex-wrap:wrap; align-items:end; gap:.6rem; }
+.friend-otp-row label { display:grid; gap:.3rem; font-size:.84rem; }
+.friend-otp-row .field { min-width:180px; }
+.friend-demo-orders { grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+.friend-demo-order { display:block; align-self:start; }
+.friend-demo-order .section-heading { margin-bottom:.8rem; }
+.friend-demo-order .section-heading h4 { margin:0; }
+.friend-qty { max-width:90px; }
+.friend-demo-checkout { padding:1.1rem 0; border-top:1px solid var(--line); }
+.friend-demo-qr-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:.8rem; margin:1rem 0; }
+.friend-demo-qr-card { justify-content:flex-start; }
+.friend-demo-qr-card h4 { margin:.35rem 0; }
+.friend-demo-qr-card p { margin:.3rem 0; }
+.friend-demo-qr { flex:0 0 132px; width:132px; height:132px; padding:7px; background:white; border:1px solid var(--line); border-radius:8px; }
+@media (max-width:700px) {
+  .friend-demo-restaurant,.friend-demo-friend { align-items:flex-start; flex-direction:column; }
+  .friend-demo-qr-card { align-items:flex-start; }
+  .friend-demo-qr { flex-basis:100px; width:100px; height:100px; }
+}
 .estimate { justify-content:space-between; border:0; font-weight:700; }
 .split-mode { display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:.8rem; }
 .share-row > b { flex:1; }

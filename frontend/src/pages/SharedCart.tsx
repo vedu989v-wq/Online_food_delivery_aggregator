@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, inr } from '../api';
 import { useAuth } from '../AuthContext';
 import type { Detail, SearchResult } from '../types';
+import FriendBasketDemo from '../components/FriendBasketDemo';
 
 interface Member { userId: string; name: string; role: 'organizer' | 'member'; addressConfirmed: boolean }
 interface CartItem { id: string; itemId: string; itemName: string; ownerId: string; ownerName: string; quantity: number; unitPricePaise?: number | null }
@@ -103,6 +104,8 @@ export default function SharedCart() {
   return <div className="feature-page">
     <div className="eyebrow">BASKET SPLIT <span className="demo-pill">Collaborative basket · test payments only</span></div>
     <div className="feature-hero"><div><h1>Build one basket together.</h1><p>Invited members can add their own items, confirm the shared address, and see changes as they happen.</p></div></div>
+    <FriendBasketDemo user={user} />
+    <div className="section-heading"><h2>Account-based shared baskets</h2><span className="muted small">Persistent invite and payment flow</span></div>
     {error && <div className="state error" role="alert">{error}</div>}
     {!cart ? <div className="cart-layout">
       <section className="card group-card"><div className="section-heading"><h2>Create a group basket</h2></div>
