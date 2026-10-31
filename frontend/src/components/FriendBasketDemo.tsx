@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, inr } from '../api';
 import type { Detail, SearchResult } from '../types';
 import type { CustomerUser } from '../AuthContext';
@@ -12,31 +13,8 @@ interface FriendState { added: boolean; selected: boolean; sent: boolean; verifi
 interface OrderLine { id: string; itemId: string; quantity: number }
 const emptyFriendState = (): FriendState => ({ added: false, selected: false, sent: false, verified: false, otp: '' });
 
-function DemoQr({ value }: { value: string }) {
-  const cells = useMemo(() => {
-    // Decorative, deterministic QR-style preview. It is deliberately not a payable/scannable QR.
-    let seed = Array.from(value).reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 7);
-    const size = 25;
-    const finder = (x: number, y: number, left: number, top: number) => {
-      const dx = x - left; const dy = y - top;
-      if (dx < 0 || dy < 0 || dx > 6 || dy > 6) return null;
-      return dx === 0 || dx === 6 || dy === 0 || dy === 6 || (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
-    };
-    return Array.from({ length: size * size }, (_, index) => {
-      const x = index % size; const y = Math.floor(index / size);
-      const fixed = finder(x, y, 0, 0) ?? finder(x, y, size - 7, 0) ?? finder(x, y, 0, size - 7);
-      if (fixed !== null) return fixed;
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      return (seed & 3) !== 0;
-    });
-  }, [value]);
-  return <svg className="friend-demo-qr" viewBox="0 0 25 25" role="img" aria-label="Illustrative demo QR preview, not scannable or payable" shapeRendering="crispEdges">
-    <rect width="25" height="25" fill="white" />
-    {cells.map((on, index) => on && <rect key={index} x={index % 25} y={Math.floor(index / 25)} width="1" height="1" fill="#10242b" />)}
-  </svg>;
-}
-
 export default function FriendBasketDemo({ user }: { user: CustomerUser }) {
+  const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [restaurant, setRestaurant] = useState<SearchResult | null>(null);
@@ -47,7 +25,6 @@ export default function FriendBasketDemo({ user }: { user: CustomerUser }) {
   const [draftItem, setDraftItem] = useState<Record<string, string>>({});
   const [draftQuantity, setDraftQuantity] = useState<Record<string, number>>({});
   const [orders, setOrders] = useState<Record<string, OrderLine[]>>({});
-  const [checkedOut, setCheckedOut] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -68,7 +45,6 @@ export default function FriendBasketDemo({ user }: { user: CustomerUser }) {
         setDetail(value);
         setProviderId(value.listings?.[0]?.providerId ?? '');
         setOrders({});
-        setCheckedOut(false);
         setError('');
       })
       .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : 'Could not load this restaurant menu.'); });
@@ -85,7 +61,8 @@ export default function FriendBasketDemo({ user }: { user: CustomerUser }) {
     return item?.offers.find(offer => offer.providerId === providerId && offer.available && offer.price != null)?.price ?? null;
   };
   const participantTotal = (participantId: string) => (orders[participantId] ?? []).reduce((sum, line) => sum + (linePrice(line) ?? 0) * line.quantity, 0);
-  const hasUnknownPrice = participants.some(person => (orders[person.id] ?? []).some(line => linePrice(line) == null));
+  const payingParticipants = participants.filter(person => (orders[person.id] ?? []).length > 0);
+  const hasUnknownPrice = payingParticipants.some(person => (orders[person.id] ?? []).some(line => linePrice(line) == null));
 
   const updateFriend = (id: string, patch: Partial<FriendState>) => setFriendState(current => ({
     ...current,
@@ -97,11 +74,27 @@ export default function FriendBasketDemo({ user }: { user: CustomerUser }) {
     if (!itemId) return;
     const line: OrderLine = { id: `${participantId}-${Date.now()}-${Math.random()}`, itemId, quantity: Math.max(1, Math.min(20, draftQuantity[participantId] || 1)) };
     setOrders(current => ({ ...current, [participantId]: [...(current[participantId] ?? []), line] }));
-    setCheckedOut(false);
   };
 
   const startOver = () => {
-    setRestaurant(null); setDetail(null); setFriendState({}); setAddress(''); setOrders({}); setCheckedOut(false); setError('');
+    setRestaurant(null); setDetail(null); setFriendState({}); setAddress(''); setOrders({}); setError('');
+  };
+
+  const proceedToCheckout = () => {
+    if (!restaurant || !detail) return;
+    navigate('/shared-cart/demo-checkout', { state: {
+      restaurantName: detail.name,
+      providerName: detail.listings.find(listing => listing.providerId === providerId)?.providerName ?? providerId,
+      address,
+      participants: payingParticipants.map(person => {
+        const lines = (orders[person.id] ?? []).map(line => {
+          const item = detail.items.find(value => value.id === line.itemId);
+          const unitPricePaise = Math.round((linePrice(line) ?? 0) * 100);
+          return { name: item?.name ?? 'Menu item', quantity: line.quantity, unitPricePaise };
+        });
+        return { id: person.id, name: person.name, items: lines, amountPaise: lines.reduce((sum, line) => sum + line.unitPricePaise * line.quantity, 0) };
+      }),
+    } });
   };
 
   return <section className="card friend-demo-card">
@@ -125,16 +118,16 @@ export default function FriendBasketDemo({ user }: { user: CustomerUser }) {
         })}</div>
       </div>
 
-      <div className="friend-demo-step"><h3>3. Confirm the shared delivery address</h3><label htmlFor="friend-demo-address">One address for the whole basket<textarea id="friend-demo-address" className="field" value={address} onChange={event => { setAddress(event.target.value); setCheckedOut(false); }} maxLength={500} placeholder="Enter the single delivery address" /></label></div>
+      <div className="friend-demo-step"><h3>3. Confirm the shared delivery address</h3><label htmlFor="friend-demo-address">One address for the whole basket<textarea id="friend-demo-address" className="field" value={address} onChange={event => setAddress(event.target.value)} maxLength={500} placeholder="Enter the single delivery address" /></label></div>
 
       <div className="friend-demo-step"><h3>4. Enter each person&apos;s food choices</h3>
         {!detail ? <p className="state">Loading this restaurant&apos;s menu…</p> : <>
-          <label>Menu provider<select className="field" value={providerId} onChange={event => { setProviderId(event.target.value); setOrders({}); setDraftItem({}); setCheckedOut(false); }}>{(detail.listings ?? []).map(listing => <option key={listing.providerId} value={listing.providerId}>{listing.providerName}</option>)}</select></label>
+          <label>Menu provider<select className="field" value={providerId} onChange={event => { setProviderId(event.target.value); setOrders({}); setDraftItem({}); }}>{(detail.listings ?? []).map(listing => <option key={listing.providerId} value={listing.providerId}>{listing.providerName}</option>)}</select></label>
           <div className="friend-demo-orders">{participants.map(person => <article className="friend-demo-order" key={person.id}><div className="section-heading"><h4>{person.name}&apos;s choices</h4><b>{inr(participantTotal(person.id))}</b></div>
             <div className="row wrap"><select className="field" aria-label={`Choose food for ${person.name}`} value={draftItem[person.id] ?? menuItems[0]?.id ?? ''} onChange={event => setDraftItem(current => ({ ...current, [person.id]: event.target.value }))}>{menuItems.map(item => <option key={item.id} value={item.id}>{item.name} · {inr(item.offers.find(offer => offer.providerId === providerId)?.price)}</option>)}</select><input className="field friend-qty" aria-label={`Quantity for ${person.name}`} type="number" min={1} max={20} value={draftQuantity[person.id] ?? 1} onChange={event => setDraftQuantity(current => ({ ...current, [person.id]: Number(event.target.value) }))} /><button type="button" className="btn" disabled={!menuItems.length} onClick={() => addItem(person.id)}>Add item</button></div>
-            {(orders[person.id] ?? []).map(line => {
+              {(orders[person.id] ?? []).map(line => {
               const item = (detail.items ?? []).find(value => value.id === line.itemId);
-              return <div className="share-row" key={line.id}><span>{item?.name ?? 'Menu item'} × {line.quantity}</span><b>{linePrice(line) == null ? 'Price unavailable' : inr(linePrice(line)! * line.quantity)}</b><button type="button" className="text-button" onClick={() => { setOrders(current => ({ ...current, [person.id]: (current[person.id] ?? []).filter(value => value.id !== line.id) })); setCheckedOut(false); }}>Remove</button></div>;
+              return <div className="share-row" key={line.id}><span>{item?.name ?? 'Menu item'} × {line.quantity}</span><b>{linePrice(line) == null ? 'Price unavailable' : inr(linePrice(line)! * line.quantity)}</b><button type="button" className="text-button" onClick={() => setOrders(current => ({ ...current, [person.id]: (current[person.id] ?? []).filter(value => value.id !== line.id) }))}>Remove</button></div>;
             })}
             {!(orders[person.id] ?? []).length && <p className="muted small">No items added yet.</p>}
           </article>)}</div>
@@ -142,10 +135,8 @@ export default function FriendBasketDemo({ user }: { user: CustomerUser }) {
         </>}
       </div>
 
-      <div className="friend-demo-checkout"><h3>5. Preview checkout split</h3><p className="muted small">Each person pays for their own selected food items only. Fees, taxes and discounts are excluded. Product data is synthetic; this demo does not place an order.</p>
-        <button type="button" className="btn" disabled={!detail || address.trim().length < 8 || participants.some(person => !(orders[person.id]?.length)) || hasUnknownPrice} onClick={() => setCheckedOut(true)}>Proceed to demo checkout</button>
-        {checkedOut && <div className="friend-demo-qr-grid">{participants.map(person => <article className="friend-demo-qr-card" key={person.id}><DemoQr value={`${person.id}:${participantTotal(person.id).toFixed(2)}:${restaurant.id}`} /><div><span className="kicker">DEMO QR · NOT PAYABLE</span><h4>{person.name}</h4><strong>{inr(participantTotal(person.id))}</strong><p className="muted small">Food items only · same address</p></div></article>)}</div>}
-        {checkedOut && <p className="state">Generated {participants.length} illustrative QR previews for {participants.length} participants. They are not scannable and do not request payment.</p>}
+      <div className="friend-demo-checkout"><h3>5. Checkout</h3><p className="muted small">Only participants who added food items receive a QR. Each person pays for their selected items only; fees, taxes and discounts are excluded. Product data is synthetic; this demo does not place an order.</p>
+        <button type="button" className="btn" disabled={!detail || !payingParticipants.length || address.trim().length < 8 || payingParticipants.some(person => participantTotal(person.id) <= 0) || hasUnknownPrice} onClick={proceedToCheckout}>Proceed to checkout</button>
       </div>
     </>}
   </section>;

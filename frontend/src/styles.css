@@ -209,15 +209,22 @@ details { margin:.6rem 0; } summary { cursor:pointer; color:var(--leaf-d); font-
 .friend-demo-order .section-heading h4 { margin:0; }
 .friend-qty { max-width:90px; }
 .friend-demo-checkout { padding:1.1rem 0; border-top:1px solid var(--line); }
-.friend-demo-qr-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:.8rem; margin:1rem 0; }
-.friend-demo-qr-card { justify-content:flex-start; }
-.friend-demo-qr-card h4 { margin:.35rem 0; }
-.friend-demo-qr-card p { margin:.3rem 0; }
-.friend-demo-qr { flex:0 0 132px; width:132px; height:132px; padding:7px; background:white; border:1px solid var(--line); border-radius:8px; }
+.friend-checkout-page { max-width:1100px; }
+.friend-checkout-layout { display:grid; grid-template-columns:minmax(0,1fr) minmax(340px,.9fr); gap:1rem; align-items:start; }
+.friend-checkout-people { display:grid; gap:.6rem; }
+.friend-checkout-person { padding:1rem 0; border-bottom:1px solid var(--line); }
+.friend-checkout-person h3 { margin:0; }
+.friend-checkout-total { padding-top:1rem; font-size:1.1rem; }
+.friend-checkout-qr-grid { display:grid; gap:.8rem; margin:1rem 0; }
+.friend-checkout-qr { display:flex; align-items:center; gap:1rem; padding:1rem; border:1px solid var(--line); border-radius:14px; background:#fff; }
+.friend-checkout-qr img,.friend-checkout-qr-error { width:150px; height:150px; flex:0 0 150px; object-fit:contain; }
+.friend-checkout-qr-error { display:grid; place-items:center; background:#fff4df; border-radius:8px; color:#785100; font-size:.8rem; }
+.friend-checkout-qr h3 { margin:.35rem 0; }
 @media (max-width:700px) {
   .friend-demo-restaurant,.friend-demo-friend { align-items:flex-start; flex-direction:column; }
-  .friend-demo-qr-card { align-items:flex-start; }
-  .friend-demo-qr { flex-basis:100px; width:100px; height:100px; }
+  .friend-checkout-layout { grid-template-columns:1fr; }
+  .friend-checkout-qr { align-items:flex-start; flex-direction:column; }
+  .friend-checkout-qr img,.friend-checkout-qr-error { width:128px; height:128px; flex-basis:128px; }
 }
 .estimate { justify-content:space-between; border:0; font-weight:700; }
 .split-mode { display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:.8rem; }
