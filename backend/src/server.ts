@@ -2,7 +2,10 @@ import express, { type Request, type Response } from "express";
 import cors from "cors";
 import { authAllowedOrigins, authRouter, authenticate, requireAdmin } from "./auth-routes.js";
 import { customerRouter } from "./customer-routes.js";
-import { databaseConfigured } from "./db.js";
+import { sharedCartRouter } from "./shared-cart-routes.js";
+import { smartmealRouter } from "./smartmeal-routes.js";
+import { databaseConfigured, inTransaction, query } from "./db.js";
+import { configuredPaymentProvider, verifyRazorpayWebhook } from "./payment-provider.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -22,10 +25,42 @@ app.use(cors({
     return callback(null, false);
   },
   credentials: true,
-  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["content-type", "x-csrf-token"],
   maxAge: 600,
 }));
+app.post("/api/payments/webhooks/razorpay", express.raw({ type: "application/json", limit: "1mb" }), async (req, res) => {
+  const rawBody = req.body;
+  if (!Buffer.isBuffer(rawBody)) return res.status(415).end();
+  if (!verifyRazorpayWebhook(rawBody, req.get("x-razorpay-signature"), process.env.RAZORPAY_WEBHOOK_SECRET)) return res.status(400).json({ error: { code: "INVALID_WEBHOOK_SIGNATURE", message: "Webhook signature could not be verified." } });
+  const eventId = req.get("x-razorpay-event-id") || "";
+  if (!/^[a-zA-Z0-9_-]{1,255}$/.test(eventId)) return res.status(400).json({ error: { code: "INVALID_WEBHOOK_EVENT", message: "Webhook event identifier is invalid." } });
+  let payload: any;
+  try { payload = JSON.parse(rawBody.toString("utf8")); } catch { return res.status(400).end(); }
+  const eventType = typeof payload?.event === "string" ? payload.event : "";
+  const qrCodeId = payload?.payload?.qr_code?.entity?.id || payload?.payload?.payment?.entity?.qr_code_id;
+  const provider = configuredPaymentProvider();
+  try {
+    const pending = qrCodeId && provider ? await query<{ id: string; amount_paise: string; provider_reference: string }>(
+      "SELECT id,amount_paise::text,provider_reference FROM shared_cart_payments WHERE provider='razorpay' AND provider_reference=$1 AND status='pending'", [qrCodeId]) : { rows: [] } as any;
+    const verifiedIds: string[] = [];
+    for (const payment of pending.rows) {
+      const status = await provider!.verifyQrPayment(payment.provider_reference, Number(payment.amount_paise));
+      if (status.status === "paid") verifiedIds.push(payment.id);
+    }
+    const duplicate = await inTransaction(async client => {
+      const received = await client.query("INSERT INTO payment_webhook_events(provider,event_id,event_type,entity_id) VALUES('razorpay',$1,$2,$3) ON CONFLICT DO NOTHING RETURNING event_id", [eventId, eventType || "unknown", typeof qrCodeId === "string" ? qrCodeId : null]);
+      if (!received.rowCount) return true;
+      for (const paymentId of verifiedIds) await client.query("UPDATE shared_cart_payments SET status='paid',updated_at=now() WHERE id=$1 AND status='pending'", [paymentId]);
+      await client.query("UPDATE payment_webhook_events SET processing_status=$2,processed_at=now() WHERE provider='razorpay' AND event_id=$1", [eventId, verifiedIds.length ? "processed" : "ignored"]);
+      return false;
+    });
+    return res.status(duplicate ? 200 : 202).json({ received: true, duplicate });
+  } catch {
+    // Return non-2xx so Razorpay retries when durable receipt or authoritative verification is unavailable.
+    return res.status(503).json({ error: { code: "WEBHOOK_PROCESSING_UNAVAILABLE", message: "Payment status could not be verified or recorded." } });
+  }
+});
 app.use(express.json({ limit: "1mb" }));
 app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -35,6 +70,8 @@ app.use((_req, res, next) => {
 
 app.use("/api/auth", authRouter);
 app.use("/api/customer", customerRouter);
+app.use("/api/shared-carts", sharedCartRouter);
+app.use("/api/smartmeal", smartmealRouter);
 app.use("/api/admin", authenticate, requireAdmin);
 
 async function proxyPython(req: Request, res: Response, endpoint: string, method: "GET" | "POST" = "GET") {

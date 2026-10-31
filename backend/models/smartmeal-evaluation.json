@@ -1,0 +1,57 @@
+{
+  "version": "smartmeal-synthetic-v1",
+  "selected_model": "logistic_regression_baseline",
+  "baseline": "logistic_regression_baseline",
+  "dataset": {
+    "rows": 8000,
+    "simulated_users": 500,
+    "source": "reproducibly generated synthetic candidate scenarios",
+    "labels": "Bernoulli samples from documented synthetic preference utility; not real customer, consumption, or health outcomes"
+  },
+  "split": "75/25 grouped by simulated user; seed 20261031",
+  "evaluation": {
+    "logistic_regression_baseline": {
+      "precision": 0.7698826597131682,
+      "recall": 0.8735207100591716,
+      "f1": 0.8184338184338185,
+      "roc_auc": 0.7823366389071518,
+      "accuracy": 0.738,
+      "confusion_matrix": [
+        [
+          295,
+          353
+        ],
+        [
+          171,
+          1181
+        ]
+      ],
+      "precision_at_3": 0.9013333333333332,
+      "ndcg_at_5": 0.8958032153553812
+    },
+    "random_forest": {
+      "precision": 0.8212867355043686,
+      "recall": 0.764792899408284,
+      "f1": 0.7920337035618537,
+      "roc_auc": 0.7805297592957849,
+      "accuracy": 0.7285,
+      "confusion_matrix": [
+        [
+          423,
+          225
+        ],
+        [
+          318,
+          1034
+        ]
+      ],
+      "precision_at_3": 0.9146666666666666,
+      "ndcg_at_5": 0.9049178394194609
+    }
+  },
+  "limitations": [
+    "Synthetic labels only; no genuine user feedback.",
+    "No nutrition data is modeled.",
+    "Metrics measure reproduction of simulated preferences, not recommendation quality in production."
+  ]
+}

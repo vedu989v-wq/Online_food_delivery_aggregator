@@ -6,6 +6,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "migrate": "tsx src/migrate.ts",
+    "import:nutrition": "tsx src/import-nutrition.ts",
     "test": "tsx --test src/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
