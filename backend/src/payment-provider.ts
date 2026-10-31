@@ -6,6 +6,7 @@ export interface PaymentProvider {
   readonly name: string;
   createSingleUseUpiQr(input: { amountPaise: number; description: string; paymentRequestId: string }): Promise<PaymentQr>;
   verifyQrPayment(qrCodeId: string, expectedPaise: number): Promise<PaymentStatus>;
+  closeSingleUseUpiQr(qrCodeId: string): Promise<void>;
 }
 
 export class PaymentProviderUnavailable extends Error {
@@ -49,12 +50,19 @@ export class RazorpayProvider implements PaymentProvider {
     if (captured.some(payment => payment.amount !== expectedPaise)) return { status: "failed", amountPaise: 0 };
     return { status: "pending", amountPaise: 0 };
   }
+
+  async closeSingleUseUpiQr(qrCodeId: string): Promise<void> {
+    if (!/^qr_[a-zA-Z0-9]+$/.test(qrCodeId)) throw new Error("Invalid QR code reference");
+    await this.request(`/payments/qr_codes/${encodeURIComponent(qrCodeId)}/close`, { method: "POST", body: "{}" });
+  }
 }
 
 export function configuredPaymentProvider(): PaymentProvider | null {
   const id = process.env.RAZORPAY_KEY_ID?.trim() || "";
   const secret = process.env.RAZORPAY_KEY_SECRET?.trim() || "";
-  if (!id || !secret) return null;
+  // Current split amounts are computed from synthetic FoodLens fixture prices.
+  // Only allow Razorpay test credentials until a live provider quote/order exists.
+  if (process.env.PAYMENT_ENV !== "test" || !id.startsWith("rzp_test_") || !secret) return null;
   return new RazorpayProvider(id, secret);
 }
 

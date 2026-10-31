@@ -40,19 +40,35 @@ app.post("/api/payments/webhooks/razorpay", express.raw({ type: "application/jso
   const eventType = typeof payload?.event === "string" ? payload.event : "";
   const qrCodeId = payload?.payload?.qr_code?.entity?.id || payload?.payload?.payment?.entity?.qr_code_id;
   const provider = configuredPaymentProvider();
+  if (qrCodeId && !provider) return res.status(503).json({ error: { code: "PAYMENT_PROVIDER_UNCONFIGURED", message: "Test payment verification is unavailable; retry the webhook after configuration." } });
   try {
     const pending = qrCodeId && provider ? await query<{ id: string; amount_paise: string; provider_reference: string }>(
-      "SELECT id,amount_paise::text,provider_reference FROM shared_cart_payments WHERE provider='razorpay' AND provider_reference=$1 AND status='pending'", [qrCodeId]) : { rows: [] } as any;
-    const verifiedIds: string[] = [];
+      "SELECT id,amount_paise::text,provider_reference FROM shared_cart_payments WHERE provider='razorpay' AND provider_reference=$1 AND status IN ('pending','expired')", [qrCodeId]) : { rows: [] } as any;
+    const verified: Array<{ id: string; status: "paid" | "failed"; paymentId?: string }> = [];
     for (const payment of pending.rows) {
       const status = await provider!.verifyQrPayment(payment.provider_reference, Number(payment.amount_paise));
-      if (status.status === "paid") verifiedIds.push(payment.id);
+      if (status.status === "paid" || status.status === "failed") verified.push({ id: payment.id, status: status.status, paymentId: status.paymentId });
     }
     const duplicate = await inTransaction(async client => {
       const received = await client.query("INSERT INTO payment_webhook_events(provider,event_id,event_type,entity_id) VALUES('razorpay',$1,$2,$3) ON CONFLICT DO NOTHING RETURNING event_id", [eventId, eventType || "unknown", typeof qrCodeId === "string" ? qrCodeId : null]);
       if (!received.rowCount) return true;
-      for (const paymentId of verifiedIds) await client.query("UPDATE shared_cart_payments SET status='paid',updated_at=now() WHERE id=$1 AND status='pending'", [paymentId]);
-      await client.query("UPDATE payment_webhook_events SET processing_status=$2,processed_at=now() WHERE provider='razorpay' AND event_id=$1", [eventId, verifiedIds.length ? "processed" : "ignored"]);
+      const cartIds = new Set<string>();
+      for (const payment of verified) {
+        const updated = await client.query<{ cart_id: string }>("UPDATE shared_cart_payments SET status=$2,provider_payment_id=$3,updated_at=now() WHERE id=$1 AND status IN ('pending','expired') RETURNING cart_id", [payment.id, payment.status, payment.paymentId || null]);
+        if (updated.rowCount) {
+          cartIds.add(updated.rows[0].cart_id);
+          await client.query("INSERT INTO shared_cart_events(cart_id,event_type,payload) VALUES($1,'payment_status_updated',$2)", [updated.rows[0].cart_id, JSON.stringify({ paymentId: payment.id, status: payment.status })]);
+        }
+      }
+      for (const cartId of cartIds) {
+        const changed = await client.query<{ state: string }>(`UPDATE shared_carts c SET state=CASE
+        WHEN (SELECT count(*) FROM shared_cart_payments p WHERE p.cart_id=c.id AND p.allocation_version=c.version AND p.status='paid') >= jsonb_array_length(a.breakdown->'shares') THEN 'ready_for_checkout'
+        WHEN EXISTS(SELECT 1 FROM shared_cart_payments p WHERE p.cart_id=c.id AND p.allocation_version=c.version AND p.status='paid') THEN 'partially_paid'
+        ELSE 'payment_failed' END,updated_at=now()
+        FROM shared_cart_allocations a WHERE c.id=$1 AND a.cart_id=c.id AND a.version=c.version AND c.state IN ('awaiting_payments','partially_paid','payment_failed') RETURNING c.state`, [cartId]);
+        if (changed.rowCount) await client.query("INSERT INTO shared_cart_events(cart_id,event_type,payload) VALUES($1,'cart_status_changed',$2)", [cartId, JSON.stringify({ state: changed.rows[0].state })]);
+      }
+      await client.query("UPDATE payment_webhook_events SET processing_status=$2,processed_at=now() WHERE provider='razorpay' AND event_id=$1", [eventId, verified.length ? "processed" : "ignored"]);
       return false;
     });
     return res.status(duplicate ? 200 : 202).json({ received: true, duplicate });
