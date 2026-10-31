@@ -9,7 +9,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process
 
 try {
   await pool.query("CREATE TABLE IF NOT EXISTS foodlens_schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
-  for (const name of ["001_customer_accounts.sql", "002_smartmeal_basket_split.sql"]) {
+  for (const name of ["001_customer_accounts.sql", "002_smartmeal_basket_split.sql", "003_basket_split_lifecycle.sql"]) {
     const applied = await pool.query("SELECT 1 FROM foodlens_schema_migrations WHERE name = $1", [name]);
     if (applied.rowCount) { console.log(`${name} already applied`); continue; }
     const sql = await readFile(join(here, "..", "migrations", name), "utf8");
