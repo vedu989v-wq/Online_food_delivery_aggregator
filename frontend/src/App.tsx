@@ -9,6 +9,7 @@ import Admin from "./pages/Admin";
 import Login from "./pages/Login";
 import SmartMeal from "./pages/SmartMeal";
 import SharedCart from "./pages/SharedCart";
+import FriendBasketCheckout from "./pages/FriendBasketCheckout";
 import { Sustainability, Savings } from "./pages/Insights";
 import Landing from "./pages/Landing";
 import Demo from "./pages/Demo";
@@ -75,7 +76,7 @@ function AppShell() {
         <Route element={<RequireAccount />}><Route path="/dashboard" element={<Dashboard />} /></Route>
         <Route element={<RequireAccount admin />}><Route path="/admin" element={<Admin />} /></Route>
         <Route path="/smart-meal" element={<SmartMeal />} />
-        <Route element={<RequireAccount />}><Route path="/shared-cart" element={<SharedCart />} /></Route>
+        <Route element={<RequireAccount />}><Route path="/shared-cart" element={<SharedCart />} /><Route path="/shared-cart/demo-checkout" element={<FriendBasketCheckout />} /></Route>
         <Route path="/sustainability" element={<Sustainability />} />
         <Route path="/savings" element={<Savings />} />
         <Route path="*" element={<div className="state">Page not found. <Link to="/">Back to FoodLens</Link></div>} />

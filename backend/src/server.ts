@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from "express";
+import { randomUUID } from "node:crypto";
 import cors from "cors";
-import { authAllowedOrigins, authRouter, authenticate, requireAdmin } from "./auth-routes.js";
+import { authAllowedOrigins, authRouter, authenticate, requireAdmin, requireCsrf } from "./auth-routes.js";
 import { customerRouter } from "./customer-routes.js";
 import { sharedCartRouter } from "./shared-cart-routes.js";
 import { smartmealRouter } from "./smartmeal-routes.js";
@@ -89,6 +90,37 @@ app.use("/api/customer", customerRouter);
 app.use("/api/shared-carts", sharedCartRouter);
 app.use("/api/smartmeal", smartmealRouter);
 app.use("/api/admin", authenticate, requireAdmin);
+
+// Demo friends are client-side identities, so their per-person test QRs are
+// generated without creating or impersonating customer accounts. This route
+// remains test-only because configuredPaymentProvider rejects all live keys.
+app.post("/api/demo-payments/qrs", authenticate, requireCsrf, async (req, res) => {
+  const provider = configuredPaymentProvider();
+  if (!provider) return res.status(503).json({ error: { code: "TEST_PAYMENTS_UNCONFIGURED", message: "Per-person demo QRs require Razorpay test credentials and PAYMENT_ENV=test. Live payments are disabled." } });
+  const participants = req.body?.participants;
+  if (!Array.isArray(participants) || participants.length < 1 || participants.length > 3) {
+    return res.status(400).json({ error: { code: "INVALID_DEMO_PARTICIPANTS", message: "Provide one to three demo participants." } });
+  }
+  if (participants.some((person: any) => !person || typeof person.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(person.id)
+    || typeof person.name !== "string" || !person.name.trim() || person.name.trim().length > 80
+    || !Number.isSafeInteger(person.amountPaise) || person.amountPaise <= 0 || person.amountPaise > 100_000_000)) {
+    return res.status(400).json({ error: { code: "INVALID_DEMO_SHARE", message: "Each participant needs a name and positive amount in paise." } });
+  }
+  const payments = [];
+  for (const participant of participants as Array<{ id: string; name: string; amountPaise: number }>) {
+    try {
+      const qr = await provider.createSingleUseUpiQr({
+        amountPaise: participant.amountPaise,
+        description: `FoodLens demo share for ${participant.name.trim()}`,
+        paymentRequestId: randomUUID(),
+      });
+      payments.push({ participantId: participant.id, name: participant.name.trim(), amountPaise: qr.amountPaise, imageUrl: qr.imageUrl, status: "created" });
+    } catch {
+      payments.push({ participantId: participant.id, name: participant.name.trim(), amountPaise: participant.amountPaise, imageUrl: null, status: "failed", error: "Test QR generation failed." });
+    }
+  }
+  return res.json({ payments });
+});
 
 async function proxyPython(req: Request, res: Response, endpoint: string, method: "GET" | "POST" = "GET") {
   const target = new URL(endpoint, `${pythonApiBase}/`);
