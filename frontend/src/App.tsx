@@ -38,6 +38,12 @@ function AppShell() {
     api<Meta>("/meta").then(data => { setMeta(data); setDown(false); }).catch(() => setDown(true));
   }, [retryCount]);
 
+  useEffect(() => {
+    const showUnavailable = () => setDown(true);
+    window.addEventListener("foodlens:python-unavailable", showUnavailable);
+    return () => window.removeEventListener("foodlens:python-unavailable", showUnavailable);
+  }, []);
+
   async function handleLogout() {
     setLogoutError("");
     try { await logout(); window.location.assign("/"); }
@@ -58,7 +64,7 @@ function AppShell() {
     </header>
 
     <main>
-      {down && <div className="state error" role="alert">The restaurant data API is unavailable right now. Your public demo still works. <button className="btn ghost" onClick={() => setRetryCount(count => count + 1)}>Retry connection</button></div>}
+      {down && <div className="state error" role="alert">The restaurant data API is unavailable. If the Render Python service is asleep, open its health endpoint, wait until it reports <code>status: ok</code>, then retry. <a className="btn ghost" href={import.meta.env.VITE_PYTHON_WAKE_URL || "https://foodlens-python-api.onrender.com/api/health"} target="_blank" rel="noreferrer">Wake Python service</a> <button className="btn ghost" onClick={() => setRetryCount(count => count + 1)}>Retry connection</button></div>}
       {logoutError && <div className="state error" role="alert">{logoutError}</div>}
       <Routes>
         <Route path="/" element={<Landing />} />
@@ -69,7 +75,7 @@ function AppShell() {
         <Route element={<RequireAccount />}><Route path="/dashboard" element={<Dashboard />} /></Route>
         <Route element={<RequireAccount admin />}><Route path="/admin" element={<Admin />} /></Route>
         <Route path="/smart-meal" element={<SmartMeal />} />
-        <Route path="/shared-cart" element={<SharedCart />} />
+        <Route element={<RequireAccount />}><Route path="/shared-cart" element={<SharedCart />} /></Route>
         <Route path="/sustainability" element={<Sustainability />} />
         <Route path="/savings" element={<Savings />} />
         <Route path="*" element={<div className="state">Page not found. <Link to="/">Back to FoodLens</Link></div>} />

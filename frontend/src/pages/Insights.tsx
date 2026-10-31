@@ -18,8 +18,8 @@ export function Savings() {
   return (
     <div className="feature-page">
       <div className="eyebrow">MY SAVINGS <span className="demo-pill">History unavailable</span></div>
-      <div className="feature-hero"><div><h1>Your comparison history will live here.</h1><p>The current MVP does not save comparisons, user accounts, orders, or verified checkout totals.</p></div><div className="spark-card"><span className="spark">—</span><b>No saved total</b><small>Nothing has been counted as money saved.</small></div></div>
-      <section className="card history-card"><span className="kicker">NOT RECORDED</span><h2>No comparison history yet</h2><p className="muted">A lower estimate across providers is not confirmed savings. We would need a saved comparison baseline and an actual checkout amount to report savings responsibly.</p><Link className="btn" to="/">Compare a basket</Link></section>
+      <div className="feature-hero"><div><h1>Your comparison history will live here.</h1><p>The current MVP does not save comparisons, orders, or verified checkout totals. Customer accounts and preferences can be saved when PostgreSQL is configured.</p></div><div className="spark-card"><span className="spark">—</span><b>No saved total</b><small>Nothing has been counted as money saved.</small></div></div>
+      <section className="card history-card"><span className="kicker">NOT RECORDED</span><h2>No comparison history yet</h2><p className="muted">A lower estimate across providers is not confirmed savings. We would need a saved comparison baseline and an actual checkout amount to report savings responsibly.</p><Link className="btn" to="/search">Compare a basket</Link></section>
     </div>
   );
 }

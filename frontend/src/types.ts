@@ -118,6 +118,7 @@ export interface RecommendationResponse {
   weights: Record<string, number>;
   message?: string;
   disclaimer: string;
+  model?: { mode: 'trained' | 'fallback'; name: string; version?: string };
 }
 export interface ReviewSignalsResponse {
   totalReviews: number;

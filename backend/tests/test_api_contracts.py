@@ -180,13 +180,23 @@ def test_recommendations_are_ranked_from_available_csv_menu_rows(client):
         assert first["restaurantName"] == canonical.loc[first["restaurantId"], "canonical_name"]
     assert first["estimatedSubtotal"] <= 1000
     assert first["reasons"]
-    assert len(first["factors"]) == 4
+    assert len(first["factors"]) >= 4
+    assert body["model"]["mode"] in ("trained", "fallback")
     assert "taxes" in body["disclaimer"]
 
 
 def test_recommendations_reject_unknown_priority(client):
     response = client.get("/api/intelligence/recommendations", params={"priority": "random"})
     assert response.status_code == 400
+
+
+def test_recommendations_apply_delivery_time_limit(client):
+    response = client.get("/api/intelligence/recommendations", params={"maxDeliveryTime": 30, "limit": 50})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["filters"]["maxDeliveryTime"] == 30
+    assert all(row["etaMin"] is not None and row["etaMin"] <= 30 for row in body["recommendations"])
+    assert client.get("/api/intelligence/recommendations", params={"maxDeliveryTime": 241}).status_code == 400
 
 
 def test_recommendations_reject_malformed_behavior_signals(client):

@@ -48,14 +48,33 @@ async function getRestaurantFromPython(id: string): Promise<string[] | null> {
 
 async function proxyRecommendations(req: AuthenticatedRequest, res: Response, next: (error?: unknown) => void) {
   const auth = req.auth!;
+  const people = req.query.people == null ? 1 : Number(req.query.people);
+  const requestedBudget = req.query.budgetPerPerson == null ? null : Number(req.query.budgetPerPerson);
+  const requestedPriority = typeof req.query.priority === "string" ? req.query.priority : auth.priority;
+  const requestedVegetarian = req.query.vegetarian === "true" ? true : req.query.vegetarian === "false" ? false : auth.vegetarianOnly;
+  const requestedCuisine = typeof req.query.cuisine === "string" ? cleanText(req.query.cuisine, 40) : auth.preferredCuisines[0] || null;
+  const requestedEta = req.query.maxDeliveryTime == null ? null : Number(req.query.maxDeliveryTime);
+  const calorieTarget = req.query.calorieTarget == null ? null : Number(req.query.calorieTarget);
+  const proteinTargetG = req.query.proteinTargetG == null ? null : Number(req.query.proteinTargetG);
+  if (!Number.isInteger(people) || people < 1 || people > 12
+    || (requestedBudget !== null && (!Number.isFinite(requestedBudget) || requestedBudget <= 0 || requestedBudget > 1_000_000))
+    || !priorities.has(requestedPriority)
+    || (typeof req.query.vegetarian === "string" && !["true", "false"].includes(req.query.vegetarian))
+    || (typeof req.query.cuisine === "string" && !requestedCuisine)
+    || (requestedEta !== null && (!Number.isInteger(requestedEta) || requestedEta < 1 || requestedEta > 240))
+    || (calorieTarget !== null && (!Number.isInteger(calorieTarget) || calorieTarget < 500 || calorieTarget > 10000))
+    || (proteinTargetG !== null && (!Number.isFinite(proteinTargetG) || proteinTargetG < 0 || proteinTargetG > 500))) {
+    return fail(res, 400, "INVALID_RECOMMENDATION_FILTER", "Check the budget, group size, cuisine, priority, and delivery-time filters.");
+  }
   const params = new URLSearchParams({
-    limit: "12",
-    people: "1",
-    priority: auth.priority,
-    vegetarian: String(auth.vegetarianOnly),
+    limit: calorieTarget !== null || proteinTargetG !== null ? "50" : "12",
+    people: String(people),
+    priority: requestedPriority,
+    vegetarian: String(requestedVegetarian),
   });
-  if (auth.budgetPerPerson != null) params.set("budgetPerPerson", String(auth.budgetPerPerson));
-  if (auth.preferredCuisines?.length) params.set("cuisine", auth.preferredCuisines[0]);
+  if (requestedBudget !== null || auth.budgetPerPerson != null) params.set("budgetPerPerson", String(requestedBudget ?? auth.budgetPerPerson));
+  if (requestedCuisine) params.set("cuisine", requestedCuisine);
+  if (requestedEta !== null) params.set("maxDeliveryTime", String(requestedEta));
   if (auth.city) params.set("city", auth.city);
   if (auth.area) params.set("area", auth.area);
   if (auth.interactionConsent) {
@@ -75,7 +94,24 @@ async function proxyRecommendations(req: AuthenticatedRequest, res: Response, ne
     const response = await fetch(`${pythonBase}/api/intelligence/recommendations?${params}`, { signal: AbortSignal.timeout(15_000) });
     const body = await response.json().catch(() => null);
     if (!response.ok) return res.status(response.status).json({ error: { code: "RECOMMENDATIONS_UNAVAILABLE", message: "Recommendations could not be loaded right now." } });
-    return res.json(body);
+    if (!body || !Array.isArray(body.recommendations)) return res.status(503).json({ error: { code: "RECOMMENDATIONS_UNAVAILABLE", message: "Recommendations could not be loaded right now." } });
+    const ids = [...new Set(body.recommendations.map((row: any) => row.itemId).filter((id: unknown): id is string => typeof id === "string"))];
+    const nutritionRows = ids.length && (calorieTarget !== null || proteinTargetG !== null) ? await query(`SELECT dish_key AS "itemId",dish_name AS "dishName",serving_size_g AS "servingSizeG",calories_kcal AS "caloriesKcal",protein_g AS "proteinG",carbohydrates_g AS "carbohydratesG",fat_g AS "fatG",fiber_g AS "fiberG",sodium_mg AS "sodiumMg",source_name AS "sourceName",source_reference AS "sourceReference",estimation_method AS "estimationMethod",confidence_level AS "confidenceLevel",verification_status AS "verificationStatus" FROM nutrition_records WHERE dish_key=ANY($1::text[])`, [ids]) : { rows: [] };
+    const nutritionById = new Map(nutritionRows.rows.map((row: any) => [row.itemId, row]));
+    const enrich = (row: any) => ({ ...row, nutrition: nutritionById.get(row.itemId) ?? { status: "unavailable", reason: "No documented dish-specific nutrition record is available." } });
+    let recommendations = body.recommendations.map(enrich);
+    if (calorieTarget !== null || proteinTargetG !== null) {
+      recommendations = recommendations.filter((row: any) => {
+        const n = nutritionById.get(row.itemId) as any;
+        return Boolean(n) && (calorieTarget === null || (n.caloriesKcal != null && Number(n.caloriesKcal) <= calorieTarget))
+          && (proteinTargetG === null || (n.proteinG != null && Number(n.proteinG) >= proteinTargetG));
+      });
+      recommendations = recommendations.slice(0, 12);
+      body.nutritionConstraints = { maximumCaloriesKcalPerServing: calorieTarget, minimumProteinGPerServing: proteinTargetG, missingNutritionExcluded: true };
+      if (!recommendations.length) body.message = "No menu item has documented nutrition data that meets the selected target in the current dataset.";
+    }
+    return res.json({ ...body, recommendations, total: recommendations.length,
+      disclaimer: `${body.disclaimer} Nutrition values are shown only with source and serving evidence; targets are hard filters only when a documented nutrition record exists.` });
   } catch { return res.status(503).json({ error: { code: "RECOMMENDATIONS_UNAVAILABLE", message: "The recommendation service is temporarily unavailable." } }); }
 }
 
@@ -133,6 +169,46 @@ router.delete("/saved-restaurants/:restaurantId", requireCsrf, async (req: Authe
 });
 
 router.get("/recommendations", (req: AuthenticatedRequest, res, next) => proxyRecommendations(req, res, next));
+
+router.get("/health-profile", async (req: AuthenticatedRequest, res) => {
+  try {
+    const result = await query("SELECT consented,age_years AS \"ageYears\",height_cm AS \"heightCm\",weight_kg AS \"weightKg\",activity_level AS \"activityLevel\",goal,dietary_preference AS \"dietaryPreference\",calorie_target AS \"calorieTarget\",protein_target_g AS \"proteinTargetG\",updated_at AS \"updatedAt\" FROM smartmeal_health_profiles WHERE user_id=$1", [req.auth!.id]);
+    return res.json({ profile: result.rows[0] ?? { consented: false } });
+  } catch { return dbFail(res); }
+});
+
+router.put("/health-profile", requireCsrf, async (req: AuthenticatedRequest, res) => {
+  const body = req.body ?? {};
+  const consented = body.consented === true;
+  const numberOrNull = (v: unknown) => v == null || v === "" ? null : Number(v);
+  const age = consented ? numberOrNull(body.ageYears) : null;
+  const height = consented ? numberOrNull(body.heightCm) : null;
+  const weight = consented ? numberOrNull(body.weightKg) : null;
+  const calories = consented ? numberOrNull(body.calorieTarget) : null;
+  const protein = consented ? numberOrNull(body.proteinTargetG) : null;
+  const activity = consented ? body.activityLevel ?? null : null;
+  const goal = consented ? body.goal ?? null : null;
+  const diet = consented ? cleanText(body.dietaryPreference, 80) : null;
+  if (consented && ((age !== null && (!Number.isInteger(age) || age < 18 || age > 120))
+    || (height !== null && (!Number.isFinite(height) || height < 100 || height > 250))
+    || (weight !== null && (!Number.isFinite(weight) || weight < 25 || weight > 350))
+    || (calories !== null && (!Number.isInteger(calories) || calories < 500 || calories > 10000))
+    || (protein !== null && (!Number.isFinite(protein) || protein < 0 || protein > 500))
+    || (activity !== null && !["sedentary","light","moderate","active","very_active"].includes(activity))
+    || (goal !== null && !["maintenance","balanced","muscle_gain","weight_loss","high_protein"].includes(goal))
+    || (body.dietaryPreference != null && !diet))) return fail(res, 400, "INVALID_HEALTH_PROFILE", "Check the optional health profile values.");
+  try {
+    await query(`INSERT INTO smartmeal_health_profiles(user_id,consented,age_years,height_cm,weight_kg,activity_level,goal,dietary_preference,calorie_target,protein_target_g,updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()) ON CONFLICT(user_id) DO UPDATE SET consented=excluded.consented,age_years=excluded.age_years,height_cm=excluded.height_cm,weight_kg=excluded.weight_kg,activity_level=excluded.activity_level,goal=excluded.goal,dietary_preference=excluded.dietary_preference,calorie_target=excluded.calorie_target,protein_target_g=excluded.protein_target_g,updated_at=now()`,
+    [req.auth!.id, consented, age, height, weight, activity, goal, diet, calories, protein]);
+    return res.json({ saved: true, profile: { consented, ageYears: age, heightCm: height, weightKg: weight, activityLevel: activity, goal, dietaryPreference: diet, calorieTarget: calories, proteinTargetG: protein } });
+  } catch { return dbFail(res); }
+});
+
+router.delete("/health-profile", requireCsrf, async (req: AuthenticatedRequest, res) => {
+  try { await query("DELETE FROM smartmeal_health_profiles WHERE user_id=$1", [req.auth!.id]); return res.status(204).end(); }
+  catch { return dbFail(res); }
+});
 
 router.post("/interactions", requireCsrf, async (req: AuthenticatedRequest, res) => {
   const eventType = req.body?.eventType;

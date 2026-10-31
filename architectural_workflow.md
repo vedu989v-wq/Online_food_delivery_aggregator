@@ -57,7 +57,7 @@ print(df.describe(include="all"))
 
 Dataset inspection provides an initial understanding of the available data and helps determine the next steps, such as data cleaning, preprocessing, feature selection, and model selection.
 
-*Note: The actual findings should be documented after running these checks on the dataset.*
+The dataset findings and current service/API boundaries are recorded below and in the [backend guide](backend/README.md). These checks describe the committed synthetic snapshot, not live provider data.
 
 ### Observations
 - The committed CSVs contain 200 provider listings (17 columns), 100 canonical restaurants (9), 320 menu rows (13), 110 offers (14), 320 reviews (10), and 100 restaurant-match evaluation pairs (8).

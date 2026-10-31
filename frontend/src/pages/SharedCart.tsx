@@ -1,175 +1,124 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, inr } from '../api';
-import type { Compare, Detail, SearchResult } from '../types';
+import { useAuth } from '../AuthContext';
+import type { Detail, SearchResult } from '../types';
 
-interface CartLine { key: number; itemId: string; owner: string; qty: number }
+interface Member { userId: string; name: string; role: 'organizer' | 'member'; addressConfirmed: boolean }
+interface CartItem { id: string; itemId: string; itemName: string; ownerId: string; ownerName: string; quantity: number }
+interface SharedCartData { id: string; restaurantId: string; restaurantName: string; state: string; version: number; organizerId: string; address?: string; members: Member[]; items: CartItem[] }
+interface CartListEntry { id: string; restaurantName: string; state: string; memberCount: number }
 
 export default function SharedCart() {
+  const { user } = useAuth();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [carts, setCarts] = useState<CartListEntry[]>([]);
+  const [cart, setCart] = useState<SharedCartData | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
-  const [searchBusy, setSearchBusy] = useState(false);
-  const [detailBusy, setDetailBusy] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [itemId, setItemId] = useState('');
+  const [quantity, setQuantity] = useState(1);
+  const [estimateProviderId, setEstimateProviderId] = useState('');
+  const [invite, setInvite] = useState('');
+  const [shareLink, setShareLink] = useState('');
+  const [address, setAddress] = useState('');
   const [error, setError] = useState('');
-  const [people, setPeople] = useState(['You']);
-  const [newPerson, setNewPerson] = useState('');
-  const [selectedItemId, setSelectedItemId] = useState('');
-  const [selectedOwner, setSelectedOwner] = useState('You');
-  const [lines, setLines] = useState<CartLine[]>([]);
-  const [mode, setMode] = useState<'items' | 'split'>('items');
-  const [comparison, setComparison] = useState<Compare | null>(null);
-  const [providerId, setProviderId] = useState('');
-  const nextKey = useRef(0);
+  const [busy, setBusy] = useState(false);
+  const eventCursor = useRef('0');
+
+  const refreshCarts = useCallback(async () => {
+    const data = await api<{ carts: CartListEntry[] }>('/shared-carts');
+    setCarts(data.carts);
+  }, []);
+  const refreshCart = useCallback(async (id: string) => {
+    const data = await api<{ cart: SharedCartData }>(`/shared-carts/${id}`);
+    setCart(data.cart);
+    if (data.cart.address) setAddress(data.cart.address);
+    return data.cart;
+  }, [user?.id]);
+
+  useEffect(() => { refreshCarts().catch(reason => setError(reason instanceof Error ? reason.message : 'Could not load shared carts.')); }, [refreshCarts]);
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.hash.slice(1)).get('invite');
+    if (!token) return;
+    setInvite(token);
+    history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+  }, []);
+  useEffect(() => {
+    if (!cart) return;
+    let alive = true;
+    eventCursor.current = '0';
+    const poll = async () => {
+      const updates = await api<{ events: Array<{ id: string | number }> }>(`/shared-carts/${cart.id}/events?after=${eventCursor.current}`);
+      if (updates.events.length) {
+        eventCursor.current = String(updates.events[updates.events.length - 1].id);
+        if (alive) await refreshCart(cart.id);
+      }
+    };
+    const timer = window.setInterval(() => { if (alive) void poll().catch(() => undefined); }, 3000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [cart?.id, refreshCart]);
+  useEffect(() => {
+    if (!cart) { setDetail(null); return; }
+    let alive = true;
+    api<Detail>(`/restaurants/${encodeURIComponent(cart.restaurantId)}`).then(value => { if (alive) { setDetail(value); setItemId(value.items[0]?.id ?? ''); setEstimateProviderId(value.listings[0]?.providerId ?? ''); } }).catch(reason => { if (alive) setError(reason instanceof Error ? reason.message : 'Could not load the menu.'); });
+    return () => { alive = false; };
+  }, [cart?.restaurantId]);
 
   useEffect(() => {
-    let cancelled = false;
     const timer = window.setTimeout(() => {
-      setSearchBusy(true);
-      api<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(query)}&limit=20`)
-        .then(data => { if (!cancelled) { setResults(data.results); setError(''); } })
-        .catch(reason => { if (!cancelled) setError(reason instanceof Error ? reason.message : 'Could not search restaurants.'); })
-        .finally(() => { if (!cancelled) setSearchBusy(false); });
+      api<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(query)}&limit=20`).then(value => setResults(value.results)).catch(() => setResults([]));
     }, query ? 250 : 0);
-    return () => { cancelled = true; window.clearTimeout(timer); };
+    return () => window.clearTimeout(timer);
   }, [query]);
 
-  useEffect(() => {
-    if (!detail || lines.length === 0) {
-      setComparison(null);
-      setProviderId('');
-      return;
+  async function act(work: () => Promise<void>) {
+    setBusy(true); setError('');
+    try { await work(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'The request could not be completed.'); }
+    finally { setBusy(false); }
+  }
+  const ownerEstimate = (ownerId: string): number | null => {
+    const owned = (cart?.items ?? []).filter(line => line.ownerId === ownerId);
+    if (!owned.length) return 0;
+    let total = 0;
+    for (const line of owned) {
+      const menuItem = detail?.items.find(item => item.id === line.itemId);
+      const offer = menuItem?.offers.find(value => value.providerId === estimateProviderId && value.available && value.price != null);
+      if (!offer || offer.price == null) return null;
+      total += offer.price * line.quantity;
     }
-    const selections = new Map<string, number>();
-    for (const line of lines) selections.set(line.itemId, (selections.get(line.itemId) ?? 0) + line.qty);
-    let cancelled = false;
-    setBusy(true);
-    setError('');
-    api<Compare>('/compare', {
-      method: 'POST',
-      body: JSON.stringify({ restaurantId: detail.id, priority: 'value', selections: [...selections].map(([itemId, qty]) => ({ itemId, qty })) }),
-    }).then(data => {
-      if (!cancelled) {
-        setComparison(data);
-        setProviderId(current => data.options.some(option => option.providerId === current) ? current : data.options[0]?.providerId ?? '');
-      }
-    }).catch(reason => { if (!cancelled) setError(reason instanceof Error ? reason.message : 'Could not compare this basket.'); })
-      .finally(() => { if (!cancelled) setBusy(false); });
-    return () => { cancelled = true; };
-  }, [detail, lines]);
-
-  const option = comparison?.options.find(candidate => candidate.providerId === providerId) ?? comparison?.options[0];
-  const priceFor = (line: CartLine) => {
-    const item = detail?.items.find(candidate => candidate.id === line.itemId);
-    const offer = item?.offers.find(candidate => candidate.providerId === option?.providerId && candidate.available && candidate.price != null);
-    return offer?.price == null ? null : offer.price * line.qty;
+    return total;
   };
-  const memberSubtotals = useMemo(() => Object.fromEntries(people.map(person => [person, lines.filter(line => line.owner === person).reduce((sum, line) => sum + (priceFor(line) ?? 0), 0)])), [people, lines, detail, option]);
-  const subtotal = Object.values(memberSubtotals).reduce((sum, value) => sum + value, 0);
-  const addLine = () => {
-    if (!detail || !selectedItemId) return;
-    const currentQuantity = lines.filter(line => line.itemId === selectedItemId).reduce((sum, line) => sum + line.qty, 0);
-    if (currentQuantity >= 20) { setError('A menu item can have at most 20 units in this basket.'); return; }
-    setLines(current => [...current, { key: nextKey.current++, itemId: selectedItemId, owner: selectedOwner, qty: 1 }]);
-    setError('');
-  };
-  const addPerson = () => {
-    const name = newPerson.trim();
-    if (!name || people.some(person => person.toLowerCase() === name.toLowerCase())) return;
-    setPeople(current => [...current, name]);
-    setNewPerson('');
-  };
-  const chooseRestaurant = async (restaurant: SearchResult) => {
-    setDetail(null);
-    setLines([]);
-    setComparison(null);
-    setError('');
-    setDetailBusy(true);
-    try {
-      const data = await api<Detail>(`/restaurants/${encodeURIComponent(restaurant.id)}`);
-      setDetail(data);
-      setSelectedItemId(data.items[0]?.id ?? '');
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not load restaurant menu.');
-    } finally {
-      setDetailBusy(false);
-    }
-  };
+  const selectCart = (value: SharedCartData) => { setCart(value); setShareLink(''); };
 
-  return (
-    <div className="feature-page">
-      <div className="eyebrow">SHARED CART <span className="demo-pill">This browser only</span></div>
-      <div className="feature-hero"><div><h1>Build a basket and split the estimate.</h1><p>Add items from one restaurant, assign them to local participants, and compare the basket using current CSV-backed menu data.</p></div></div>
-      <div className="state">This cart is not synchronized or shared with other people. It is held in this page only and clears when you reload. Invite links and shared sessions are not implemented.</div>
-      {!detail && error && <div className="state error" role="alert">{error}</div>}
-
-      <div className="cart-layout">
-        <section className="card group-card">
-          <div className="section-heading"><div><span className="kicker">01 · RESTAURANT</span><h2>{detail?.name ?? 'Choose a restaurant'}</h2></div></div>
-          {!detail && <>
-            {detailBusy && <p className="muted">Loading selected menu…</p>}
-            <label htmlFor="cart-restaurant-search">Search restaurants</label>
-            <input id="cart-restaurant-search" className="field" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by restaurant or dish" />
-            {searchBusy && <p className="muted small">Searching…</p>}
-            {!searchBusy && !error && results.length === 0 && <p className="muted small">No restaurants found. Try another name.</p>}
-            <div className="member-list">{results.map(result => <button type="button" key={result.id} className="btn ghost full" onClick={() => void chooseRestaurant(result)}>{result.name} · {result.area || 'Area unavailable'}</button>)}</div>
-          </>}
-          {detail && <>
-            <p className="muted small">{detail.area} · {detail.cuisines.join(', ')}</p>
-            <button type="button" className="btn ghost full" onClick={() => { setDetail(null); setLines([]); }}>Choose another restaurant</button>
-            <div className="section-heading"><div><span className="kicker">LOCAL PARTICIPANTS</span><h2>{people.length} participant{people.length === 1 ? '' : 's'}</h2></div></div>
-            <div className="row"><input className="field" aria-label="Participant name" placeholder="Add a name" value={newPerson} onChange={event => setNewPerson(event.target.value)} /><button type="button" className="btn ghost" onClick={addPerson}>Add</button></div>
-            <p className="muted small">Participant names exist only in this browser session.</p>
-          </>}
-        </section>
-
-        <section>
-          {detail && <div className="card">
-            <div className="section-heading"><div><span className="kicker">02 · BASKET</span><h2>Add a menu item</h2></div></div>
-            <div className="row wrap">
-              <select className="field" aria-label="Menu item" value={selectedItemId} onChange={event => setSelectedItemId(event.target.value)}>{detail.items.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
-              <select className="field" aria-label="Assign item to participant" value={selectedOwner} onChange={event => setSelectedOwner(event.target.value)}>{people.map(person => <option key={person}>{person}</option>)}</select>
-              <button type="button" className="btn" disabled={!selectedItemId} onClick={addLine}>Add item</button>
-            </div>
-            {lines.length === 0 && <p className="state">Add an item to compare provider basket estimates.</p>}
-            {lines.map(line => {
-              const item = detail.items.find(candidate => candidate.id === line.itemId);
-              return <div className="cart-item" key={line.key}>
-                <div className="cart-item-info"><b>{item?.name ?? line.itemId}</b><small className="muted">{inr(priceFor(line))} · {option?.providerName ?? 'select an eligible provider'}</small></div>
-                <select aria-label={`Owner for ${item?.name ?? line.itemId}`} value={line.owner} onChange={event => setLines(current => current.map(row => row.key === line.key ? { ...row, owner: event.target.value } : row))}>{people.map(person => <option key={person}>{person}</option>)}</select>
-                <div className="stepper"><button type="button" aria-label={`Remove one ${item?.name ?? line.itemId}`} onClick={() => setLines(current => current.flatMap(row => row.key !== line.key ? [row] : row.qty > 1 ? [{ ...row, qty: row.qty - 1 }] : []))}>−</button><span>{line.qty}</span><button type="button" aria-label={`Add one ${item?.name ?? line.itemId}`} onClick={() => {
-                  const totalQty = lines.filter(row => row.itemId === line.itemId).reduce((sum, row) => sum + row.qty, 0);
-                  if (totalQty < 20) setLines(current => current.map(row => row.key === line.key ? { ...row, qty: row.qty + 1 } : row));
-                  else setError('A menu item can have at most 20 units in this basket.');
-                }}>+</button></div>
-                <button type="button" className="icon-btn" aria-label={`Remove ${item?.name ?? line.itemId}`} onClick={() => setLines(current => current.filter(row => row.key !== line.key))}>×</button>
-              </div>;
-            })}
-            {busy && <div className="state">Comparing this basket…</div>}
-            {error && <div className="state error" role="alert">{error}</div>}
-            {comparison && comparison.options.length > 0 && <>
-              <label htmlFor="cart-provider">Estimate from provider</label>
-              <select id="cart-provider" className="field" value={option?.providerId} onChange={event => setProviderId(event.target.value)}>{comparison.options.map(candidate => <option key={candidate.providerId} value={candidate.providerId}>{candidate.providerName} · {inr(candidate.pricing.total)}{candidate.pricing.isLowerBound ? ' (lower bound)' : ''}</option>)}</select>
-              <div className="estimate"><span>Basket estimate</span><strong>{option?.pricing.isLowerBound ? 'At least ' : ''}{inr(option?.pricing.total)}</strong></div>
-              <p className="muted small">{comparison.disclaimer}</p>
-            </>}
-            {comparison?.options.length === 0 && <div className="state">No provider can fulfil this basket with the available data.</div>}
-          </div>}
-
-          {detail && <>
-            <div className="tabs compact"><button type="button" className={mode === 'items' ? 'on' : ''} onClick={() => setMode('items')}>Items</button><button type="button" className={mode === 'split' ? 'on' : ''} onClick={() => setMode('split')}>Estimate split</button></div>
-            {mode === 'split' && <div className="card"><div className="section-heading"><div><h2>Proportional split</h2><span className="muted small">Based on each person&apos;s listed item subtotal</span></div></div>
-              {people.map(person => {
-                const personSubtotal = memberSubtotals[person] ?? 0;
-                const amount = mode === 'split' && option ? (subtotal > 0 ? option.pricing.total * personSubtotal / subtotal : option.pricing.total / people.length) : 0;
-                return <div className="share-row" key={person}><b>{person}</b><span className="muted">Items {inr(personSubtotal)}</span><strong>{inr(amount)}</strong></div>;
-              })}
-              <div className="estimate"><span>Allocated estimate</span><strong>{option?.pricing.isLowerBound ? 'At least ' : ''}{inr(option?.pricing.total)}</strong></div>
-              <p className="muted small">This proportional allocation is calculated from the selected provider estimate. Unknown fees are excluded; it is not a bill or a synchronized group payment.</p>
-            </div>}
-          </>}
-        </section>
-      </div>
-    </div>
-  );
+  if (!user) return <div className="feature-page"><div className="state">Sign in to create or join a synchronized shared basket. <Link to="/login">Sign in</Link></div></div>;
+  return <div className="feature-page">
+    <div className="eyebrow">BASKET SPLIT <span className="demo-pill">Persisted group cart · payments unavailable</span></div>
+    <div className="feature-hero"><div><h1>Build one basket together.</h1><p>Invited members can add their own items, confirm the shared address, and see changes as they happen.</p></div></div>
+    {error && <div className="state error" role="alert">{error}</div>}
+    {!cart ? <div className="cart-layout">
+      <section className="card group-card"><div className="section-heading"><h2>Create a group basket</h2></div>
+        <label htmlFor="cart-search">Choose a restaurant</label><input id="cart-search" className="field" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search restaurants or dishes" />
+        <div className="member-list">{results.slice(0, 8).map(result => <button type="button" key={result.id} disabled={busy} className="btn ghost full" onClick={() => void act(async () => { const data = await api<{ cart: SharedCartData }>('/shared-carts', { method: 'POST', body: JSON.stringify({ restaurantId: result.id }) }); selectCart(data.cart); await refreshCarts(); })}>{result.name} · {result.area || 'Area unavailable'}</button>)}</div>
+      </section>
+      <section className="card"><div className="section-heading"><h2>Join by invitation</h2></div><label>Invitation token or link<input className="field" value={invite} onChange={event => setInvite(event.target.value)} placeholder="Paste a FoodLens invite link" /></label><button className="btn" disabled={!invite || busy} onClick={() => void act(async () => { const value = invite.includes('invite=') ? new URL(invite).hash.split('invite=')[1] : invite; const data = await api<{ cart: SharedCartData }>('/shared-carts/join', { method: 'POST', body: JSON.stringify({ inviteToken: decodeURIComponent(value) }) }); selectCart(data.cart); setInvite(''); await refreshCarts(); })}>Join basket</button>
+        <h2 className="section-heading">Your active baskets</h2>{carts.map(value => <button className="btn ghost full" key={value.id} onClick={() => void act(async () => selectCart(await refreshCart(value.id)))}>{value.restaurantName} · {value.memberCount} member{value.memberCount === 1 ? '' : 's'} · {value.state}</button>)}{carts.length === 0 && <p className="muted small">No active shared baskets yet.</p>}
+      </section>
+    </div> : <div className="cart-layout">
+      <section className="card group-card"><div className="section-heading"><div><span className="kicker">SHARED BASKET</span><h2>{cart.restaurantName}</h2></div><button className="btn ghost" onClick={() => setCart(null)}>All baskets</button></div>
+        <p className="muted small">Version {cart.version} · {cart.state}</p>
+        <h3>Members</h3>{cart.members.map(member => <div className="share-row" key={member.userId}><b>{member.name}{member.userId === user.id ? ' (you)' : ''}</b><span className="muted small">{member.role}{member.addressConfirmed ? ' · address confirmed' : ' · address not confirmed'}</span></div>)}
+        {cart.organizerId === user.id && <><button className="btn ghost full" disabled={busy} onClick={() => void act(async () => { const value = await api<{ inviteToken: string }>(`/shared-carts/${cart.id}/invitations`, { method: 'POST', body: '{}' }); const link = `${location.origin}/shared-cart#invite=${encodeURIComponent(value.inviteToken)}`; setShareLink(link); await navigator.clipboard?.writeText(link); })}>Create invite link</button>{shareLink && <p className="muted small">One-time invite link copied. It expires in 24 hours: <a href={shareLink}>{shareLink}</a></p>}
+        <label>Shared delivery address<textarea className="field" value={address} onChange={event => setAddress(event.target.value)} maxLength={500} /></label><p className="small muted">All basket members can view this address to confirm they are using the same destination.</p><button className="btn" disabled={busy || address.trim().length < 8} onClick={() => void act(async () => { await api(`/shared-carts/${cart.id}/address`, { method: 'PUT', body: JSON.stringify({ address }) }); await refreshCart(cart.id); })}>Save shared address</button><button className="btn ghost" disabled={busy || cart.state !== 'open'} onClick={() => void act(async () => { await api(`/shared-carts/${cart.id}/cancel`, { method: 'POST', body: '{}' }); await refreshCarts(); setCart(null); })}>Cancel basket</button></>}
+        {cart.organizerId !== user.id && <><p className="small muted">Shared delivery address: {cart.address || 'The organizer has not set an address yet.'}</p><label>Confirm the organizer&apos;s delivery address<input className="field" value={address} onChange={event => setAddress(event.target.value)} maxLength={500} /></label><button className="btn" disabled={busy || address.trim().length < 8} onClick={() => void act(async () => { await api(`/shared-carts/${cart.id}/address-confirmation`, { method: 'POST', body: JSON.stringify({ address }) }); await refreshCart(cart.id); })}>Confirm same address</button></>}
+      </section>
+      <section className="card"><div className="section-heading"><div><span className="kicker">MENU</span><h2>Items for everyone</h2></div></div>
+        {detail && <div className="row wrap"><select className="field" aria-label="Menu item" value={itemId} onChange={event => setItemId(event.target.value)}>{detail.items.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select><input className="field" type="number" aria-label="Quantity" min={1} max={20} value={quantity} onChange={event => setQuantity(Number(event.target.value))} /><button className="btn" disabled={busy || !itemId} onClick={() => void act(async () => { const data = await api<{ cart: SharedCartData }>(`/shared-carts/${cart.id}/items`, { method: 'POST', body: JSON.stringify({ itemId, quantity }) }); setCart(data.cart); })}>Add to my items</button></div>}
+        {cart.items?.map(item => <div className="cart-item" key={item.id}><div className="cart-item-info"><b>{item.itemName}</b><small className="muted">{item.quantity} × · added by {item.ownerName}</small></div>{item.ownerId === user.id && <button type="button" className="icon-btn" aria-label={`Remove ${item.itemName}`} disabled={busy} onClick={() => void act(async () => { await api(`/shared-carts/${cart.id}/items/${item.id}`, { method: 'DELETE' }); await refreshCart(cart.id); })}>×</button>}</div>)}
+        {!cart.items?.length && <p className="state">Add an item to start the group basket.</p>}
+        {detail && cart.items?.length > 0 && <div className="card"><h3>Item subtotal estimates</h3><label>Provider menu<select className="field" value={estimateProviderId} onChange={event => setEstimateProviderId(event.target.value)}>{detail.listings.map(listing => <option key={listing.providerId} value={listing.providerId}>{listing.providerName}</option>)}</select></label>{cart.members.map(member => <div className="share-row" key={member.userId}><b>{member.name}</b><strong>{ownerEstimate(member.userId) == null ? 'unknown' : inr(ownerEstimate(member.userId))}</strong></div>)}<p className="muted small">These are listed item prices only from synthetic menu data. Fees, taxes, discounts, availability, and final checkout amounts may differ; these are not payment shares.</p></div>}
+        <div className="state">Checkout and payment collection are unavailable. Current provider comparisons omit or estimate fees, so FoodLens cannot produce a reliable payable split yet. Your cart items and item ownership are synchronized and persisted.</div>
+      </section>
+    </div>}
+  </div>;
 }

@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from routers import admin
 from services.admin_service import demo_admin_enabled
+from services.smartmeal_model import model_metadata, predict_fit
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
@@ -609,6 +610,7 @@ def get_intelligent_recommendations(
     city: str = "",
     area: str = "",
     behaviorSignals: str = "",
+    maxDeliveryTime: int | None = None,
 ):
     """Rank real CSV menu offers using request preferences and explain each result."""
     if not 1 <= limit <= 50:
@@ -617,6 +619,8 @@ def get_intelligent_recommendations(
         raise HTTPException(status_code=400, detail="people must be between 1 and 12.")
     if budgetPerPerson is not None and (not math.isfinite(budgetPerPerson) or budgetPerPerson <= 0):
         raise HTTPException(status_code=400, detail="budgetPerPerson must be positive.")
+    if maxDeliveryTime is not None and not 1 <= maxDeliveryTime <= 240:
+        raise HTTPException(status_code=400, detail="maxDeliveryTime must be between 1 and 240 minutes.")
 
     priority = priority.casefold().replace(" ", "_")
     if priority == "balanced":
@@ -714,6 +718,8 @@ def get_intelligent_recommendations(
                 continue
             listing = listing_rows.iloc[0]
             eta = _number(listing.get("average_delivery_time_minutes"))
+            if maxDeliveryTime is not None and (eta is None or eta > maxDeliveryTime):
+                continue
             raw_rating = _number(listing.get("rating"))
             rating_count = _number(listing.get("rating_count"), 0) or 0
             adjusted_rating = ((rating_count * raw_rating + 30 * 3.9) / (rating_count + 30)) if raw_rating is not None and rating_count > 0 else None
@@ -748,6 +754,7 @@ def get_intelligent_recommendations(
     if not candidates:
         return {"total": 0, "recommendations": [], "priority": priority, "weights": weights,
                 "message": "No available menu items match these filters in the current dataset.",
+                "model": model_metadata() or {"mode": "fallback", "name": "deterministic preference ranking"},
                 "disclaimer": "Synthetic menu subtotals only; taxes, delivery fees, platform fees, and checkout totals are not included."}
 
     costs = [row["estimatedSubtotal"] for row in candidates]
@@ -780,6 +787,32 @@ def get_intelligent_recommendations(
             *( [f"Small behavior bonus from {behavior_count} consented interactions matching these cuisines."] if behavior_bonus else [] ),
         ]
 
+    model_rows = []
+    priority_flags = {
+        "priority_cost": float(priority == "cheapest"),
+        "priority_speed": float(priority == "fastest"),
+        "priority_rating": float(priority == "rated"),
+    }
+    model_budget = budgetPerPerson if budgetPerPerson is not None else 600.0
+    model_eta_limit = float(maxDeliveryTime if maxDeliveryTime is not None else 90)
+    for row in candidates:
+        model_rows.append({"unit_price": row["unitPrice"], "budget": model_budget,
+                           "budget_ratio": row["unitPrice"] / model_budget,
+                           "vegetarian_match": float(row["vegetarian"] == bool(vegetarian)) if vegetarian is not None else 0.5,
+                           "eta": row["etaMin"], "eta_limit": model_eta_limit,
+                           "rating": row["rating"], **priority_flags})
+    model_scores = predict_fit(model_rows)
+    model_info = model_metadata() if model_scores is not None else None
+    if model_scores is not None:
+        for row, probability in zip(candidates, model_scores):
+            behavior_count = row["behaviorCuisineCount"]
+            consented_bonus = min(0.05, behavior_count * 0.01) if behavior_count >= 3 else 0.0
+            row["score"] = round(min(1.0, probability + consented_bonus) * 100, 2)
+            row["factors"].append({"factor": "synthetic_model_fit", "weight": 1.0, "value": round(probability, 3), "known": True})
+            row["reasons"].append("A trained model ranked preference fit from synthetic simulated preference labels; this is not learned user behavior or nutrition evidence.")
+            if consented_bonus:
+                row["reasons"].append(f"Small ranking adjustment from {behavior_count} consented interactions matching these cuisines.")
+
     candidates.sort(key=lambda row: (-row["score"], row["estimatedSubtotal"], row["restaurantName"].casefold(), row["itemName"].casefold()))
     recommendations = []
     seen_restaurants = set()
@@ -796,7 +829,8 @@ def get_intelligent_recommendations(
     return {
         "total": len(candidates), "recommendations": recommendations, "priority": priority,
         "weights": weights,
-        "filters": {"budgetPerPerson": budgetPerPerson, "people": people, "vegetarian": vegetarian, "cuisine": cuisine, "city": city, "area": requested_area},
+        "filters": {"budgetPerPerson": budgetPerPerson, "people": people, "vegetarian": vegetarian, "cuisine": cuisine, "city": city, "area": requested_area, "maxDeliveryTime": maxDeliveryTime},
+        "model": model_info or {"mode": "fallback", "name": "deterministic preference ranking"},
         "disclaimer": "Synthetic CSV menu data. Subtotals use listed item prices only; taxes, delivery/platform fees, discounts, and checkout totals are not included.",
     }
 

@@ -11,7 +11,7 @@ FoodLens is a cross-provider food comparison project for the Indian delivery mar
 - Python computes reputation summaries, menu recommendations, basket prices, and explanations from committed CSVs. Recommendation results are built on demand so filters and user priorities affect ranking; no generated intelligence dataset is required.
 - Review-pattern signals flag repeated normalized text and same-provider/date review clusters for human inspection. They are not fraud labels.
 - Admin review cards come from synthetic benchmark rows marked `manual_review`; choices only hide a sample for the current Python process and never rewrite source datasets or canonical assignments.
-- Smart Meal and the local basket use API results. Shared Cart is a single-browser calculation, not a synchronized group cart. Savings history, sustainability impact data, and accounts are clearly unavailable rather than populated with sample numbers.
+- SmartMeal uses CSV menu candidates, a trained model on clearly synthetic preference labels when available, and documented deterministic fallback; nutrition remains unavailable unless provenance-bearing dish records are imported. Shared Cart is persisted and synchronized through authenticated PostgreSQL APIs. Comparison history and sustainability impact data remain unavailable.
 
 ## Stack and architecture
 
@@ -70,7 +70,7 @@ npm run migrate
 
 The migration is repeatable and creates customer-only tables; it does not touch the canonical CSV datasets. New users receive the `customer` role. To grant an administrator, change a trusted account's role directly in PostgreSQL; never expose an admin registration option in the browser. Production browser sessions use secure HttpOnly cookies and CSRF checks. Turning interaction consent off deletes that user's stored interaction events. Keep Express `CORS_ORIGIN` restricted to the actual frontend origin(s).
 
-For Vercel, the frontend includes a same-origin `/api/*` rewrite to the Render gateway, which avoids third-party-cookie restrictions. Set Vercel's `VITE_API_BASE_URL` to `/api` (Config, not a `VITE_` prefixed secret; this value is public routing configuration). The Render gateway must have the production Vercel origin in `CORS_ORIGIN`, `DATABASE_URL` set to a PostgreSQL instance, `DATABASE_SSL` as required by that provider, and `PYTHON_API_URL` pointed at the Python service. Run the migration once before enabling account registration. No deployment settings or database have been changed by this implementation.
+For Vercel, the frontend includes a same-origin `/api/*` rewrite to the Render gateway, which avoids third-party-cookie restrictions. Set Vercel's `VITE_API_BASE_URL` to `/api` (Config, not a `VITE_` prefixed secret; this value is public routing configuration). The Render gateway must have the production Vercel origin in `CORS_ORIGIN`, `DATABASE_URL` set to a PostgreSQL instance, `DATABASE_SSL` as required by that provider, and `PYTHON_API_URL` pointed at the Python service. Run the migration once before enabling account registration. When the free Python service sleeps, the frontend error banner links directly to its public `/api/health` endpoint to wake it before retrying. Set `VITE_PYTHON_WAKE_URL` only if that health URL changes; it is public configuration, not a secret. Keep provider credentials and database URLs in hosting-provider secret configuration; do not commit them here.
 
 Administrative write actions are disabled by default. To enable them for a local demo, set `ADMIN_DEMO_MODE=true` in both service environments while keeping Express and Python bound to loopback. Express also refuses these writes in production or when configured to listen on a non-loopback host.
 
@@ -129,14 +129,14 @@ Set `HOST=127.0.0.1` and `ADMIN_DEMO_MODE=true` in both Python and Express envir
 
 - Synthetic provider data only.
 - Review decisions are in-memory demo state, reset after restart, and do not change the canonical datasets.
-- Shared-cart contents and participant names exist only in the current browser page; there are no invite sessions or cross-device synchronization.
+- Shared carts, invitations, participant membership, item ownership, and event history require PostgreSQL and the new migration. Group delivery addresses require `FOODLENS_PII_KEY` encryption.
 - Customer accounts and preferences require a configured PostgreSQL database. Comparison history and orders are not implemented. The Savings page does not claim amounts saved.
 - Environmental impact inputs (ingredient footprint, packaging, distance, transport mode) are absent, so no sustainability score or emissions estimate is produced.
 - Provider links and exact delivery/platform fees are absent from the CSV data; comparison totals are marked as lower bounds when fees are unknown.
 - Menu rows with unknown availability are not treated as available. Offers with unknown minimums or incomplete discount rules are not applied.
 - Review sentiment uses the dataset's supplied labels, which are synthetic and unverified. It is not a trained model and cannot handle nuance beyond those labels.
 - Ranking and GST/discount assumptions have not been validated against real checkout data.
-- No payments, orders, or real provider integrations. Consent-based personalization is a small explainable cuisine-count adjustment, not a trained ML model; it falls back to explicit saved preferences when insufficient events exist.
+- No payments, orders, or real provider integrations. The trained model uses synthetic simulated preference labels and must not be described as learning from customers or nutrition data. Consented cuisine counts supplement explicit preferences; the deterministic fallback remains available.
 - Admin demo writes require explicit local-only flags and are not durable. Add authenticated, audited persistence before production use.
 
 ## Tests and builds
@@ -161,3 +161,28 @@ The Python tests exercise API contracts against the committed CSV schemas, searc
 ## License
 
 Add the licence appropriate for your project before publishing.
+# SmartMeal and Basket Split implementation status
+
+The corrected implementation adds optional, consented SmartMeal health-profile storage (`/api/customer/health-profile`), nutrition provenance lookup (`/api/smartmeal/nutrition`), a reproducible supervised preference-fit training pipeline, and authenticated persisted shared baskets (`/api/shared-carts`).
+
+## Database setup
+
+Run `npm run migrate` with `DATABASE_URL` configured. Migration `002_smartmeal_basket_split.sql` adds health profiles, nutrition records, shared carts, one-use invitations, member-owned items, event history, allocations, and payment audit tables. Health profiles are stored only after explicit consent and are deleted by `DELETE /api/customer/health-profile`.
+
+Set `FOODLENS_PII_KEY` to a random 32-byte key encoded as 64 hex characters before enabling shared delivery-address entry. Addresses are encrypted with AES-256-GCM; member confirmation fingerprints use HMAC-SHA256. Do not log this key or put it in a `VITE_` variable. Rotate it only with a migration plan for existing ciphertext.
+
+## SmartMeal nutrition and model
+
+The restaurant/menu CSVs remain canonical synthetic application data and are not modified. Nutrition values are not inferred from item names. The endpoint returns `unavailable` unless `nutrition_records` contains a dish-specific row with source, serving size, method, and verification status. Add records only from licensed, documented data and retain the source reference; a menu label by itself is not a nutrition record. USDA FoodData Central data are Public Domain/CC0; review its [API guide](https://fdc.nal.usda.gov/api-guide/) and dataset record before creating an ingredient-to-recipe estimate. Ingredient quantities and serving sizes must be documented; otherwise leave nutrition unavailable.
+
+For a reviewed recipe mapping, create a JSON array with `dish_key`, `dish_name`, `serving_size_g`, and explicit `ingredients: [{"fdc_id": ..., "grams": ...}]` entries. Set `USDA_FDC_API_KEY` in a private shell, run `python ml/import_usda_recipes.py <recipes.json> <nutrition_records.json>`, inspect the generated provenance, then run `npm run import:nutrition -- <nutrition_records.json>` with `DATABASE_URL` set. There are no prefilled recipe mappings because the current synthetic menu lacks verified ingredient quantities.
+
+Train the supervised synthetic preference model with `python ml/train_smartmeal.py`. It compares a logistic-regression baseline with a random forest, groups the holdout by simulated user, and writes `models/smartmeal.joblib` plus `models/smartmeal-evaluation.json`. Labels are generated from a documented simulated preference utility; metrics do not measure real customer satisfaction, health outcomes, or nutrition accuracy. The API uses that model only when the artifact loads successfully and labels the model source. Otherwise it returns the deterministic ranking fallback. Model inference never overrides hard vegetarian, budget, location, or delivery-time filters.
+
+## Shared Basket Split and payment boundary
+
+Shared basket reads/writes require an authenticated account and CSRF protection. Open carts expire after 48 hours. Invitations contain a random one-use token; only its hash is stored, and it expires after 24 hours. Members can add and remove their own items. The event endpoint is a polling cursor suitable for synchronization; the frontend polls every three seconds.
+
+Important routes: `GET/POST /api/shared-carts`, `GET /api/shared-carts/:id`, `POST /:id/invitations`, `POST /api/shared-carts/join`, `POST/DELETE /:id/items`, `PUT /:id/address`, `POST /:id/address-confirmation`, `GET /:id/events?after=<cursor>`, and organizer-only `POST /:id/cancel`. SmartMeal health routes are `GET/PUT/DELETE /api/customer/health-profile`; optional numeric nutrition constraints use the authenticated `GET /api/customer/recommendations`, and provenance lookup is `GET /api/smartmeal/nutrition?itemIds=...`. The Razorpay webhook receiver is `/api/payments/webhooks/razorpay`; it verifies the raw-body HMAC and confirms a stored request only after a matching captured payment is fetched from Razorpay.
+
+Checkout lock and payment requests intentionally return `CHECKOUT_QUOTE_UNAVAILABLE`. Current provider comparison data can be lower-bound estimates and do not provide an authoritative payable breakdown. No customer is charged and no payment success is simulated. Before enabling payment, add a real quote/order handoff with exact provider fees, lock a versioned paise allocation, create a separate fixed-amount QR request per member, verify provider webhooks from the raw request bytes, deduplicate provider event IDs, and test the complete provider account in test mode. Razorpay QR creation requires an enabled Razorpay account and server-side API keys; these are not part of this repository.

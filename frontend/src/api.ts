@@ -32,6 +32,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       ? error.message
       : `Request failed (${response.status})`;
     const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
+    if (code?.startsWith("PYTHON_SERVICE_") && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("foodlens:python-unavailable"));
+    }
     throw new ApiError(message, response.status, code);
   }
   return body as T;
