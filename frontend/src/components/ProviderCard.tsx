@@ -6,9 +6,9 @@ export function ProviderCard({ o }: { o: Option }) {
   const p = o.pricing;
   return (
     <article className={'card prov-card' + (o.rank === 1 ? ' top' : '')}>
-      <div className="row between"><h3>{o.rank === 1 && <span className="rank">Top pick </span>}{o.providerName}</h3><FreshPill f={o.freshness} /></div>
+      <div className="provider-head"><h3>{o.rank === 1 && <span className="rank">Top pick · </span>}{o.providerName}</h3><FreshPill f={o.freshness} /></div>
       <div className="badges">{o.badges.map(b => <span key={b} className="badge">{b}</span>)}</div>
-      <div className="total">{p.isLowerBound ? 'at least ' : 'est. '}{inr(p.total)}<small> {o.etaMin ? `· ${o.etaMin} min` : '· time unknown'}</small></div>
+      <div className="total"><span>{p.isLowerBound ? 'At least' : 'Estimate'}</span><strong>{inr(p.total)}</strong><small>{o.etaMin ? `${o.etaMin} min` : 'Time unknown'}</small></div>
       <table className="break"><tbody>
         <tr><td>Items</td><td>{inr(p.subtotal)}</td></tr>
         <tr><td>Food GST (assumed)</td><td>{inr(p.foodTax)}</td></tr>

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, inr } from '../api';
 import type { Detail, SearchResult } from '../types';
 import type { CustomerUser } from '../AuthContext';
+import { useSessionState } from '../hooks/useSessionState';
 
 const demoFriends = [
   { id: 'demo-friend-vedansh', name: 'Vedansh', status: 'Active now' },
@@ -15,7 +16,7 @@ const emptyFriendState = (): FriendState => ({ added: false, selected: false, se
 
 export default function FriendBasketDemo({ user }: { user: CustomerUser }) {
   const navigate = useNavigate();
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useSessionState('foodlens.basket-demo.search.v1', '', value => typeof value === 'string' ? value : '');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [restaurant, setRestaurant] = useState<SearchResult | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -121,7 +122,7 @@ export default function FriendBasketDemo({ user }: { user: CustomerUser }) {
       <div className="friend-demo-step"><h3>3. Confirm the shared delivery address</h3><label htmlFor="friend-demo-address">One address for the whole basket<textarea id="friend-demo-address" className="field" value={address} onChange={event => setAddress(event.target.value)} maxLength={500} placeholder="Enter the single delivery address" /></label></div>
 
       <div className="friend-demo-step"><h3>4. Enter each person&apos;s food choices</h3>
-        {!detail ? <p className="state">Loading this restaurant&apos;s menu…</p> : <>
+        {!detail ? <p className="state loading-state" role="status">Loading this restaurant&apos;s menu…</p> : <>
           <label>Menu provider<select className="field" value={providerId} onChange={event => { setProviderId(event.target.value); setOrders({}); setDraftItem({}); }}>{(detail.listings ?? []).map(listing => <option key={listing.providerId} value={listing.providerId}>{listing.providerName}</option>)}</select></label>
           <div className="friend-demo-orders">{participants.map(person => <article className="friend-demo-order" key={person.id}><div className="section-heading"><h4>{person.name}&apos;s choices</h4><b>{inr(participantTotal(person.id))}</b></div>
             <div className="row wrap"><select className="field" aria-label={`Choose food for ${person.name}`} value={draftItem[person.id] ?? menuItems[0]?.id ?? ''} onChange={event => setDraftItem(current => ({ ...current, [person.id]: event.target.value }))}>{menuItems.map(item => <option key={item.id} value={item.id}>{item.name} · {inr(item.offers.find(offer => offer.providerId === providerId)?.price)}</option>)}</select><input className="field friend-qty" aria-label={`Quantity for ${person.name}`} type="number" min={1} max={20} value={draftQuantity[person.id] ?? 1} onChange={event => setDraftQuantity(current => ({ ...current, [person.id]: Number(event.target.value) }))} /><button type="button" className="btn" disabled={!menuItems.length} onClick={() => addItem(person.id)}>Add item</button></div>

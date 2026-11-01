@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { inr } from "../api";
+import { useSessionState } from "../hooks/useSessionState";
 
 const fixture = {
   restaurant: "Sample Curry House",
@@ -12,9 +13,18 @@ const fixture = {
     { id: "lassi", name: "Mango lassi", prices: { A: 88, B: null } },
   ],
 };
+const DEFAULT_QUANTITIES = { bowl: 1, rice: 1, naan: 1, lassi: 2 };
+
+function validateQuantities(value: unknown): Record<string, number> {
+  const parsed = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return Object.fromEntries(fixture.items.map(item => {
+    const quantity = parsed[item.id];
+    return [item.id, Number.isInteger(quantity) ? Math.max(0, Math.min(8, quantity as number)) : DEFAULT_QUANTITIES[item.id as keyof typeof DEFAULT_QUANTITIES]];
+  }));
+}
 
 export default function Demo() {
-  const [quantities, setQuantities] = useState<Record<string, number>>({ bowl: 1, rice: 1, naan: 1, lassi: 2 });
+  const [quantities, setQuantities] = useSessionState('foodlens.demo.quantities.v1', DEFAULT_QUANTITIES, validateQuantities);
   const totals = useMemo(() => ["A", "B"].map(provider => {
     let subtotal = 0;
     let unknownCount = 0;
@@ -31,7 +41,7 @@ export default function Demo() {
   const changeQuantity = (id: string, value: number) => setQuantities(current => ({ ...current, [id]: Math.max(0, Math.min(8, value)) }));
   return <div className="feature-page">
     <div className="eyebrow">PUBLIC DEMO <span className="demo-pill">Illustrative fixtures · isolated</span></div>
-    <div className="feature-hero"><div><h1>Try a basket comparison.</h1><p>Adjust sample quantities and see how FoodLens communicates known item prices and missing information. These fixtures are not provider data and are not saved.</p></div><div className="spark-card"><span className="spark">FL</span><b>Nothing is recorded</b><small>This demo does not call customer APIs.</small></div></div>
+    <div className="feature-hero"><div><h1>Try a basket comparison.</h1><p>Adjust sample quantities and see how FoodLens communicates known item prices and missing information. These fixtures are not provider data and are not saved to your account.</p></div><div className="spark-card"><span className="spark">FL</span><b>Nothing is recorded</b><small>This demo does not call customer APIs.</small></div></div>
     <div className="demo-layout">
       <section className="card"><span className="kicker">SAMPLE RESTAURANT</span><h2>{fixture.restaurant}</h2><p className="muted">{fixture.location} · not a real listing</p>
         {fixture.items.map(item => <div className="item" key={item.id}><div><b>{item.name}</b><small className="muted">Illustrative prices only</small></div><div className="stepper"><button aria-label={`Remove one ${item.name}`} onClick={() => changeQuantity(item.id, (quantities[item.id] || 0) - 1)}>−</button><span aria-live="polite">{quantities[item.id] || 0}</span><button aria-label={`Add one ${item.name}`} onClick={() => changeQuantity(item.id, (quantities[item.id] || 0) + 1)}>+</button></div></div>)}

@@ -99,7 +99,7 @@ export default function Dashboard() {
         {error && <div className="state error" role="alert">{error} <button className="btn ghost" onClick={() => void loadDashboard()}>Retry</button></div>}
         {notice && <div className="state good" role="status">{notice}</div>}
         <div className="section-heading"><div><span className="kicker">CANONICAL DATASET</span><h2>Recommended for you</h2></div><Link to="/search">Search all restaurants</Link></div>
-        {busy && <div className="state">Updating your recommendations…</div>}
+        {busy && <div className="state loading-state" role="status">Updating your recommendations…</div>}
         {!busy && recommendations?.recommendations.length === 0 && <div className="state">No menu items match these preferences in the current dataset. Try a broader city, area, cuisine, or budget.</div>}
         <div className="recommendations">{recommendations?.recommendations.slice(0, 6).map((item, index) => <article className="recommendation card" key={item.id}>
           <div className={`meal-art art-${index % 3}`}><span>{item.vegetarian ? "VEG-LABELLED" : "SAMPLE"}</span></div>
