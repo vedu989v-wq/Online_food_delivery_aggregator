@@ -3,13 +3,17 @@ import math
 import re
 import sys
 import json
+import asyncio
 from datetime import datetime, timezone
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from routers import admin
 from services.admin_service import demo_admin_enabled
 from services.smartmeal_model import model_metadata, predict_fit
+from services.smartmeal_ai import Intent, NutritionEstimate, deterministic_requirements, gemini_json, normalize_constraints, safe_recommendation_explanation
+from services.smartmeal_goal_model import score_goal
+from pydantic import BaseModel, ConfigDict, Field
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
@@ -21,6 +25,144 @@ app = FastAPI(title="FoodLens API", version="1.0")
 
 # Register modular routers *after* app is initialized
 app.include_router(admin.router)
+
+
+class SmartMealChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(min_length=1, max_length=1000)
+    profile: dict = Field(default_factory=dict)
+    history: list[dict] = Field(default_factory=list, max_length=8)
+
+
+class NutritionEnrichmentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dish_key: str = Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z0-9_.:-]+$")
+    dish_name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=800)
+
+
+class GoalRankingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile: dict = Field(default_factory=dict)
+    requirements: dict = Field(default_factory=dict)
+    recommendations: list[dict] = Field(max_length=50)
+    nutrition_by_item: dict = Field(default_factory=dict)
+
+
+class SmartMealExplainRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(min_length=1, max_length=1000)
+    requirements: dict = Field(default_factory=dict)
+    recommendations: list[dict] = Field(max_length=20)
+
+
+@app.post("/api/smartmeal/rank")
+def smartmeal_goal_rank(request: GoalRankingRequest, x_smartmeal_token: str | None = Header(default=None)):
+    _require_smartmeal_token(x_smartmeal_token)
+    results, model = score_goal(request.profile, request.requirements, request.recommendations, request.nutrition_by_item)
+    return {"recommendations": results, "goalModel": model}
+
+
+@app.post("/api/smartmeal/explain")
+async def smartmeal_explain(request: SmartMealExplainRequest, x_smartmeal_token: str | None = Header(default=None)):
+    _require_smartmeal_token(x_smartmeal_token)
+    answer = await asyncio.to_thread(safe_recommendation_explanation, request.message, request.recommendations, request.requirements)
+    return {"assistantMessage": answer}
+
+
+def _require_smartmeal_token(token: str | None):
+    expected = os.getenv("SMARTMEAL_INTERNAL_TOKEN", "")
+    if not expected or not token or not __import__("hmac").compare_digest(expected, token):
+        raise HTTPException(status_code=503, detail="SmartMeal private service is not configured.")
+
+
+@app.post("/api/smartmeal/nutrition/enrich")
+async def smartmeal_nutrition_enrich(request: NutritionEnrichmentRequest, x_smartmeal_token: str | None = Header(default=None)):
+    _require_smartmeal_token(x_smartmeal_token)
+    prompt = (
+        "Estimate one ordinary restaurant serving only when the dish identity and available description support it. "
+        "Return null for unsupported nutrient numbers; never convert unknowns to zero. For ambiguous names, return null for all nutrient numbers, low confidence, and explain why. "
+        "All outputs are estimates, never verified facts. Do not infer allergen safety. Include assumptions and uncertainty.\n"
+        + json.dumps({"dish_name": request.dish_name, "description": request.description}, ensure_ascii=False)
+    )
+    try:
+        estimate = await asyncio.wait_for(asyncio.to_thread(gemini_json, prompt, NutritionEstimate), timeout=18)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Nutrition enrichment is unavailable; no nutrition record was written.")
+    if estimate.confidence not in {"low", "medium"}:
+        raise HTTPException(status_code=422, detail="Nutrition estimate failed confidence validation.")
+    estimate_data = estimate.model_dump()
+    estimate_data["dish_name"] = request.dish_name.strip()
+    estimate_data.update({"item_id": request.dish_key, "status": "estimated", "verification_status": "approximate",
+                          "source_name": "Gemini-assisted estimate", "source_reference": "FoodLens menu key " + request.dish_key,
+                          "estimation_method": "Gemini ingredient and portion estimate; not independently verified",
+                          "model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"), "prompt_version": "smartmeal-nutrition-v1"})
+    if not any(estimate_data[key] is not None for key in ("calories_kcal", "protein_g", "carbohydrates_g", "fat_g")):
+        estimate_data["status"] = "unavailable"
+    return estimate_data
+
+
+@app.post("/api/smartmeal/chat")
+async def smartmeal_chat(request: SmartMealChatRequest, x_smartmeal_token: str | None = Header(default=None)):
+    """Interpret a request, calculate only from supplied profile, and ground results in current menu data."""
+    _require_smartmeal_token(x_smartmeal_token)
+    prompt = (
+        "Extract the user's intent into the supplied schema. Existing profile values are authoritative; do not overwrite them "
+        "unless the user explicitly says a new value. Do not calculate calorie/protein targets. Ask concise questions for missing details. "
+        "Do not diagnose, provide medical treatment, or promise weight outcomes. If they mention pregnancy, eating-disorder concerns, a medical condition, or a request for therapeutic dieting, set requires_clinical_review true and advise a qualified clinician. "
+        "For exclusions, note that the FoodLens CSV lacks verified ingredient data.\n"
+        + json.dumps({"recent_messages": request.history, "message": request.message, "existing_profile": request.profile}, ensure_ascii=False)
+    )
+    gemini_available = bool(os.getenv("GEMINI_API_KEY"))
+    try:
+        intent = await asyncio.wait_for(asyncio.to_thread(gemini_json, prompt, Intent), timeout=18)
+        intent_data = intent.model_dump()
+    except Exception:
+        # Explicit fallback mode: support only obvious budget/vegetarian shortcuts; never imply Gemini succeeded.
+        text = request.message.casefold()
+        budget_match = re.search(r"(?:₹|rs\.?\s*)(\d+(?:\.\d+)?)", text)
+        clinical_review = any(term in text for term in ("pregnan", "breastfeed", "eating disorder", "anorexia", "bulimia", "diabetes", "kidney disease", "renal disease", "medical condition", "therapeutic diet"))
+        intent_data = {"intent": "single_meal", "goal": None, "current_weight_kg": None,
+                       "target_weight_kg": None, "height_cm": None, "age_years": None,
+                       "activity_level": None, "dietary_preference": "vegetarian" if "vegetarian" in text else None,
+                       "budget_per_meal": float(budget_match.group(1)) if budget_match else None,
+                       "maximum_delivery_minutes": None, "excluded_ingredients": [], "cuisine": None,
+                       "missing_information": [], "requires_follow_up": False, "requires_clinical_review": clinical_review,
+                       "response": "Please consult a qualified healthcare professional for food guidance with those health circumstances." if clinical_review else "Gemini is unavailable, so I can only use basic preference matching for this request."}
+        intent = Intent.model_validate(intent_data)
+    profile = normalize_constraints(intent, request.profile)
+    requirements = deterministic_requirements(profile)
+    # Use the established recommendation endpoint directly to preserve its canonical CSV pipeline.
+    dietary = (profile.get("dietary_preference") or "").casefold()
+    veg = True if dietary in {"vegetarian", "vegan"} else None
+    budget = profile.get("budget_per_person")
+    try:
+        budget = float(budget) if budget is not None else None
+    except (TypeError, ValueError):
+        budget = None
+    if intent.requires_clinical_review or intent.intent not in {"goal_based_meal_planning", "single_meal", "refinement"}:
+        recommendation_data = {"recommendations": [], "model": model_metadata() or {"mode": "fallback", "name": "deterministic preference ranking"}}
+    else:
+        recommendation_data = get_intelligent_recommendations(
+            limit=20, budgetPerPerson=budget, people=1,
+            vegetarian=veg, cuisine=profile.get("cuisine", "") or "",
+            priority="value", city=profile.get("city", "") or "", area=profile.get("area", "") or "",
+            maxDeliveryTime=profile.get("maxDeliveryTime"),
+        )
+    recommendations = recommendation_data.get("recommendations", [])
+    explanation = "I found menu matches from the current FoodLens dataset." if recommendations else "I need a little more information before I can connect this request to menu matches."
+    exclusions = intent.excluded_ingredients
+    limitations = ["Nutrition values are not inferred from menu names; use sourced nutrition records where available.",
+                   "FoodLens menu data does not include verified ingredient or allergen lists.",
+                   "Menu records are synthetic application data and may not represent live provider inventory."]
+    if exclusions:
+        limitations.append("Ingredient exclusions were understood, but could not be verified against menu ingredients; do not treat these matches as allergy-safe.")
+    return {"mode": "gemini" if gemini_available and intent_data.get("response") != "Gemini is unavailable, so I can only use basic preference matching for this request." else "fallback",
+            "intent": intent_data, "profile": profile, "requirements": requirements,
+            "assistantMessage": ("For personalized meal guidance with those health circumstances, please consult a qualified healthcare professional. I won't generate a therapeutic plan." if intent.requires_clinical_review else intent.response if intent.requires_follow_up or intent.intent in {"nutrition_question", "general"} else explanation),
+            "recommendations": recommendations, "total": len(recommendations), "model": recommendation_data.get("model"),
+            "limitations": limitations,
+            "disclaimer": "Informational food discovery only, not medical advice. Estimates do not guarantee health outcomes."}
 
 cors_origins = [value.strip() for value in os.getenv("CORS_ORIGIN", "http://localhost:5173,http://127.0.0.1:5173").split(",") if value.strip()]
 app.add_middleware(
