@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, NavLink, Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api";
 import { AuthProvider, useAuth } from "./AuthContext";
 import type { Meta } from "./types";
@@ -15,13 +15,23 @@ import Landing from "./pages/Landing";
 import Demo from "./pages/Demo";
 import Dashboard from "./pages/Dashboard";
 
+type ThemePreference = "system" | "light" | "dark";
+
+function readThemePreference(): ThemePreference {
+  try {
+    const value = localStorage.getItem("foodlens-theme");
+    if (value === "light" || value === "dark") return value;
+  } catch { /* Fall back to the operating system preference. */ }
+  return "system";
+}
+
 export default function App() {
   return <AuthProvider><AppShell /></AuthProvider>;
 }
 
 function RequireAccount({ admin = false }: { admin?: boolean }) {
   const { user, ready } = useAuth();
-  if (!ready) return <div className="state">Checking your account…</div>;
+  if (!ready) return <div className="state loading-state" role="status">Checking your account…</div>;
   if (!user) return <Navigate to="/login" replace />;
   if (admin && user.role !== "admin") return <Navigate to="/dashboard" replace />;
   return <Outlet />;
@@ -29,10 +39,40 @@ function RequireAccount({ admin = false }: { admin?: boolean }) {
 
 function AppShell() {
   const { user, logout } = useAuth();
+  const location = useLocation();
+  const [theme, setTheme] = useState<ThemePreference>(readThemePreference);
+  const [effectiveTheme, setEffectiveTheme] = useState<"light" | "dark">("light");
+  const [pendingApiRequests, setPendingApiRequests] = useState(0);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [down, setDown] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const [logoutError, setLogoutError] = useState("");
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      const resolved = theme === "system" ? (media.matches ? "dark" : "light") : theme;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.style.colorScheme = resolved;
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", resolved === "dark" ? "#11191c" : "#f4f7f8");
+      setEffectiveTheme(resolved);
+    };
+    applyTheme();
+    try { localStorage.setItem("foodlens-theme", theme); } catch { /* Theme still applies for this visit. */ }
+    if (theme === "system") {
+      media.addEventListener("change", applyTheme);
+      return () => media.removeEventListener("change", applyTheme);
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    const updateProgress = (event: Event) => {
+      const pending = (event as CustomEvent<{ pending?: number }>).detail?.pending;
+      setPendingApiRequests(typeof pending === "number" ? pending : 0);
+    };
+    window.addEventListener("foodlens:api-progress", updateProgress);
+    return () => window.removeEventListener("foodlens:api-progress", updateProgress);
+  }, []);
 
   useEffect(() => {
     setDown(false);
@@ -52,6 +92,7 @@ function AppShell() {
   }
 
   return <>
+    <div className={`api-progress${pendingApiRequests > 0 ? " active" : ""}`} role="progressbar" aria-label="Loading" aria-valuemin={0} aria-valuemax={100} aria-hidden={pendingApiRequests === 0}><span /></div>
     {meta?.dataMode === "synthetic" && <div className="banner">{meta.notice}</div>}
     <header className="top">
       <Link to="/" className="brand">FoodLens</Link>
@@ -61,13 +102,15 @@ function AppShell() {
         <NavLink to="/smart-meal">Smart meal</NavLink>
         <NavLink to="/shared-cart">Basket split</NavLink>
         {user ? <><NavLink to="/dashboard">My space</NavLink>{user.role === "admin" && <NavLink to="/admin">Data quality</NavLink>}<button className="nav-button" onClick={handleLogout}>Sign out</button></> : <NavLink to="/login">Sign in</NavLink>}
+        <button type="button" className="theme-toggle" onClick={() => setTheme(effectiveTheme === "dark" ? "light" : "dark")} aria-label={`Switch to ${effectiveTheme === "dark" ? "light" : "dark"} theme`} aria-pressed={effectiveTheme === "dark"} title={`Theme: ${theme === "system" ? "system" : theme}`}><span aria-hidden="true">{effectiveTheme === "dark" ? "☀" : "☾"}</span><span className="theme-label">{effectiveTheme === "dark" ? "Dark" : "Light"}</span></button>
       </nav>
     </header>
 
-    <main>
+    <main aria-busy={pendingApiRequests > 0}>
       {down && <div className="state error" role="alert">The restaurant data API is unavailable. If the Render Python service is asleep, open its health endpoint, wait until it reports <code>status: ok</code>, then retry. <a className="btn ghost" href={import.meta.env.VITE_PYTHON_WAKE_URL || "https://foodlens-python-api.onrender.com/api/health"} target="_blank" rel="noreferrer">Wake Python service</a> <button className="btn ghost" onClick={() => setRetryCount(count => count + 1)}>Retry connection</button></div>}
       {logoutError && <div className="state error" role="alert">{logoutError}</div>}
-      <Routes>
+      <div className="route-stage" key={location.pathname}>
+      <Routes location={location}>
         <Route path="/" element={<Landing />} />
         <Route path="/demo" element={<Demo />} />
         <Route path="/search" element={<Search />} />
@@ -81,6 +124,7 @@ function AppShell() {
         <Route path="/savings" element={<Savings />} />
         <Route path="*" element={<div className="state">Page not found. <Link to="/">Back to FoodLens</Link></div>} />
       </Routes>
+      </div>
     </main>
 
     <footer id="contact">

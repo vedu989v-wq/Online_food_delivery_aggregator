@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, inr } from '../api';
 import { FreshPill } from '../components/FreshPill';
+import { useSessionState } from '../hooks/useSessionState';
 import type { Priority, RecommendationResponse } from '../types';
 import { useAuth } from '../AuthContext';
 
@@ -9,6 +10,23 @@ interface NutritionRecord { itemId: string; dishName: string; servingSizeG: numb
 interface HealthProfile { consented: boolean; ageYears?: number | null; heightCm?: number | null; weightKg?: number | null; targetWeightKg?: number | null; exerciseDaysPerWeek?: number | null; activityLevel?: string | null; goal?: string | null; dietaryPreference?: string | null; calorieTarget?: number | null; proteinTargetG?: number | null }
 interface ChatResult { mode: string; assistantMessage: string; recommendations: RecommendationResponse['recommendations']; requirements: { bmi?: number | null; estimated_energy_kcal_range?: number[] | null; protein_g_range?: number[] | null; weight_direction?: string | null; assumptions?: string[]; missing_for_estimate?: string[] }; limitations: string[]; disclaimer: string }
 interface ChatTurn { role: 'user' | 'assistant'; content: string }
+interface SmartMealPreferences { budget: string; people: string; vegetarian: boolean; cuisine: string; priority: Priority | 'balanced'; maxEta: string }
+
+const SMART_MEAL_PREFERENCES_KEY = 'foodlens.smart-meal.preferences.v1';
+const DEFAULT_PREFERENCES: SmartMealPreferences = { budget: '500', people: '2', vegetarian: true, cuisine: '', priority: 'balanced', maxEta: '' };
+
+function validatePreferences(value: unknown): SmartMealPreferences {
+  const parsed = value && typeof value === 'object' ? value as Partial<SmartMealPreferences> : {};
+  const priorities: SmartMealPreferences['priority'][] = ['balanced', 'cheapest', 'fastest', 'reliable', 'rated', 'value'];
+  return {
+    budget: typeof parsed.budget === 'string' ? parsed.budget : DEFAULT_PREFERENCES.budget,
+    people: typeof parsed.people === 'string' ? parsed.people : DEFAULT_PREFERENCES.people,
+    vegetarian: typeof parsed.vegetarian === 'boolean' ? parsed.vegetarian : DEFAULT_PREFERENCES.vegetarian,
+    cuisine: typeof parsed.cuisine === 'string' ? parsed.cuisine : DEFAULT_PREFERENCES.cuisine,
+    priority: priorities.includes(parsed.priority as SmartMealPreferences['priority']) ? parsed.priority as SmartMealPreferences['priority'] : DEFAULT_PREFERENCES.priority,
+    maxEta: typeof parsed.maxEta === 'string' ? parsed.maxEta : DEFAULT_PREFERENCES.maxEta,
+  };
+}
 
 const PRIORITIES: [Priority | 'balanced', string][] = [
   ['balanced', 'Balanced value'], ['cheapest', 'Cheapest'], ['fastest', 'Fastest'],
@@ -17,11 +35,8 @@ const PRIORITIES: [Priority | 'balanced', string][] = [
 
 export default function SmartMeal() {
   const { user } = useAuth();
-  const [budget, setBudget] = useState('500');
-  const [people, setPeople] = useState('2');
-  const [vegetarian, setVegetarian] = useState(true);
-  const [cuisine, setCuisine] = useState('');
-  const [priority, setPriority] = useState<Priority | 'balanced'>('balanced');
+  const [preferences, setPreferences] = useSessionState<SmartMealPreferences>(SMART_MEAL_PREFERENCES_KEY, DEFAULT_PREFERENCES, validatePreferences);
+  const { budget, people, vegetarian, cuisine, priority, maxEta } = preferences;
   const [cuisineOptions, setCuisineOptions] = useState<string[]>([]);
   const [data, setData] = useState<RecommendationResponse | null>(null);
   const [busy, setBusy] = useState(false);
@@ -29,7 +44,6 @@ export default function SmartMeal() {
   const [nutrition, setNutrition] = useState<Record<string, NutritionRecord>>({});
   const [health, setHealth] = useState<HealthProfile>({ consented: false });
   const [healthMessage, setHealthMessage] = useState('');
-  const [maxEta, setMaxEta] = useState('');
   const [chatText, setChatText] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState('');
@@ -130,12 +144,12 @@ export default function SmartMeal() {
       <div className="smart-layout">
         <section className="card preference-card">
           <div className="section-heading"><div><span className="kicker">01</span><h2>Your preferences</h2></div></div>
-          <label>Budget per person<input className="field" type="number" min="1" value={budget} onChange={event => setBudget(event.target.value)} aria-label="Budget per person" /></label>
-          <label>People<input className="field" type="number" min="1" max="12" value={people} onChange={event => setPeople(event.target.value)} aria-label="Number of people" /></label>
-          <label>Cuisine preference<select className="field" value={cuisine} onChange={event => setCuisine(event.target.value)}><option value="">Any cuisine</option>{cuisineOptions.map(value => <option key={value}>{value}</option>)}</select></label>
-          <div className="toggle-row"><div><b>Vegetarian only</b><small className="muted">Exclude menu items not labeled vegetarian</small></div><button type="button" className={'toggle ' + (vegetarian ? 'on' : '')} onClick={() => setVegetarian(!vegetarian)} aria-pressed={vegetarian}><span /></button></div>
-          <label>Delivery time limit, minutes<input className="field" type="number" min="1" max="240" value={maxEta} onChange={event => setMaxEta(event.target.value)} aria-label="Maximum delivery time" /></label>
-          <label>Tonight&apos;s priority<select className="field" value={priority} onChange={event => setPriority(event.target.value as Priority | 'balanced')}>{PRIORITIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          <label>Budget per person<input className="field" type="number" min="1" value={budget} onChange={event => setPreferences(current => ({ ...current, budget: event.target.value }))} aria-label="Budget per person" /></label>
+          <label>People<input className="field" type="number" min="1" max="12" value={people} onChange={event => setPreferences(current => ({ ...current, people: event.target.value }))} aria-label="Number of people" /></label>
+          <label>Cuisine preference<select className="field" value={cuisine} onChange={event => setPreferences(current => ({ ...current, cuisine: event.target.value }))}><option value="">Any cuisine</option>{cuisineOptions.map(value => <option key={value}>{value}</option>)}</select></label>
+          <div className="toggle-row"><div><b>Vegetarian only</b><small className="muted">Exclude menu items not labeled vegetarian</small></div><button type="button" className={'toggle ' + (vegetarian ? 'on' : '')} onClick={() => setPreferences(current => ({ ...current, vegetarian: !current.vegetarian }))} aria-pressed={vegetarian}><span /></button></div>
+          <label>Delivery time limit, minutes<input className="field" type="number" min="1" max="240" value={maxEta} onChange={event => setPreferences(current => ({ ...current, maxEta: event.target.value }))} aria-label="Maximum delivery time" /></label>
+          <label>Tonight&apos;s priority<select className="field" value={priority} onChange={event => setPreferences(current => ({ ...current, priority: event.target.value as Priority | 'balanced' }))}>{PRIORITIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           {user && <details className="health-profile"><summary>Optional health and fitness profile</summary><p className="small muted">Only save information you choose to provide. FoodLens uses this for informational food discovery, not medical advice. You can delete it anytime.</p>
             <label className="toggle-row"><span>Save my health profile with explicit consent</span><input type="checkbox" checked={health.consented} onChange={event => setHealth({ ...health, consented: event.target.checked })} /></label>
             {health.consented && <div className="health-fields"><p className="small muted">When set, calorie is a maximum and protein is a minimum per serving. If FoodLens has no documented nutrition record, that item is excluded from matches.</p>
@@ -173,7 +187,7 @@ export default function SmartMeal() {
             {chatResult?.mode === 'fallback' && <p className="small muted">Gemini is not configured or did not respond; this answer used basic preference matching. No AI intent extraction was performed.</p>}
           </div>
           <div className="section-heading results-heading"><div><span className="kicker">02</span><h2>Menu matches</h2></div><span className="muted small">{data ? `${data.total} candidates ranked` : ''} · {data?.model?.name ?? 'deterministic fallback'}</span></div>
-          {busy && <div className="state">Finding menu matches…</div>}
+          {busy && <div className="state loading-state" role="status">Finding menu matches…</div>}
           {error && <div className="state error" role="alert">{error}</div>}
           {!busy && !error && data?.recommendations.length === 0 && <div className="state">{data.message ?? 'No menu matches found. Try a wider budget or another cuisine.'}</div>}
           <div className="recommendations">{data?.recommendations.map((item, index) => (

@@ -1,28 +1,50 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useLocation, useParams, useSearchParams } from 'react-router-dom';
 import { api, inr } from '../api';
 import type { Compare, Detail, Priority } from '../types';
 import { ProviderCard } from '../components/ProviderCard';
 import { ReputationPanel } from '../components/ReputationPanel';
 import { SourcesPanel } from '../components/SourcesPanel';
 import { useAuth } from '../AuthContext';
+import { useSessionState } from '../hooks/useSessionState';
 
 const PRIORITIES: [Priority, string][] = [['value', 'Best value'], ['cheapest', 'Cheapest'], ['fastest', 'Fastest'], ['reliable', 'Most reliable'], ['rated', 'Best rated']];
+type RestaurantTab = 'compare' | 'reputation' | 'sources';
+interface RestaurantPreferences { qty: Record<string, number>; priority: Priority; maxEta: string; tab: RestaurantTab }
+const DEFAULT_RESTAURANT_PREFERENCES: RestaurantPreferences = { qty: {}, priority: 'value', maxEta: '', tab: 'compare' };
+
+function validateRestaurantPreferences(value: unknown): RestaurantPreferences {
+  const parsed = value && typeof value === 'object' ? value as Partial<RestaurantPreferences> : {};
+  const qty = parsed.qty && typeof parsed.qty === 'object' ? Object.fromEntries(
+    Object.entries(parsed.qty).filter(([itemId, quantity]) => typeof itemId === 'string' && Number.isInteger(quantity) && (quantity as number) >= 0 && (quantity as number) <= 20),
+  ) as Record<string, number> : DEFAULT_RESTAURANT_PREFERENCES.qty;
+  const priorities: Priority[] = ['value', 'cheapest', 'fastest', 'reliable', 'rated'];
+  const tabs: RestaurantTab[] = ['compare', 'reputation', 'sources'];
+  return {
+    qty,
+    priority: priorities.includes(parsed.priority as Priority) ? parsed.priority as Priority : DEFAULT_RESTAURANT_PREFERENCES.priority,
+    maxEta: typeof parsed.maxEta === 'string' ? parsed.maxEta : DEFAULT_RESTAURANT_PREFERENCES.maxEta,
+    tab: tabs.includes(parsed.tab as RestaurantTab) ? parsed.tab as RestaurantTab : DEFAULT_RESTAURANT_PREFERENCES.tab,
+  };
+}
 
 export default function Restaurant() {
-  const { user } = useAuth();
   const { id } = useParams();
+  const location = useLocation();
+  return <RestaurantPage key={`${id ?? 'missing'}:${location.key}`} id={id} stateKey={`${id ?? 'missing'}:${location.key}`} />;
+}
+
+function RestaurantPage({ id, stateKey }: { id?: string; stateKey: string }) {
+  const { user } = useAuth();
   const [searchParams] = useSearchParams();
+  const [view, setView] = useSessionState(`foodlens.restaurant.${stateKey}.v1`, DEFAULT_RESTAURANT_PREFERENCES, validateRestaurantPreferences);
+  const { qty, priority, maxEta, tab } = view;
   const [detail, setDetail] = useState<Detail | null>(null);
   const [detailErr, setDetailErr] = useState('');
   const [detailRetry, setDetailRetry] = useState(0);
   const [compareErr, setCompareErr] = useState('');
-  const [qty, setQty] = useState<Record<string, number>>({});
-  const [priority, setPriority] = useState<Priority>('value');
-  const [maxEta, setMaxEta] = useState('');
   const [compare, setCompare] = useState<Compare | null>(null);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<'compare' | 'reputation' | 'sources'>('compare');
   const [saved, setSaved] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -36,9 +58,16 @@ export default function Restaurant() {
       setDetail(data);
       const requestedItem = searchParams.get('item');
       const requestedQuantity = Number(searchParams.get('qty') || 1);
-      const item = data.items.find(candidate => candidate.id === requestedItem) ?? data.items[0];
-      const quantity = Number.isInteger(requestedQuantity) && requestedQuantity > 0 ? Math.min(20, requestedQuantity) : 1;
-      setQty(item ? { [item.id]: quantity } : {});
+      const savedQuantities = Object.fromEntries(Object.entries(view.qty).filter(([itemId, quantity]) =>
+        data.items.some(candidate => candidate.id === itemId) && Number.isInteger(quantity) && quantity >= 0 && quantity <= 20,
+      ));
+      if (Object.keys(savedQuantities).length) {
+        setView(current => ({ ...current, qty: savedQuantities }));
+      } else {
+        const item = data.items.find(candidate => candidate.id === requestedItem) ?? data.items[0];
+        const quantity = Number.isInteger(requestedQuantity) && requestedQuantity > 0 ? Math.min(20, requestedQuantity) : 1;
+        setView(current => ({ ...current, qty: item ? { [item.id]: quantity } : {} }));
+      }
     }).catch(error => setDetailErr(error instanceof Error ? error.message : 'Could not load this restaurant.'));
   }, [id, searchParams, detailRetry]);
 
@@ -75,8 +104,8 @@ export default function Restaurant() {
   }, [detail, qty, priority, maxEta]);
 
   if (detailErr) return <div className="state error" role="alert">{detailErr} <button className="btn ghost" onClick={() => setDetailRetry(count => count + 1)}>Retry</button></div>;
-  if (!detail) return <div className="state">Loading restaurant…</div>;
-  const setItemQuantity = (itemId: string, quantity: number) => setQty(current => ({ ...current, [itemId]: Math.max(0, Math.min(20, quantity)) }));
+  if (!detail) return <div className="state loading-state" role="status">Loading restaurant…</div>;
+  const setItemQuantity = (itemId: string, quantity: number) => setView(current => ({ ...current, qty: { ...current.qty, [itemId]: Math.max(0, Math.min(20, quantity)) } }));
 
   async function toggleSaved() {
     if (!user || !detail) return;
@@ -94,7 +123,7 @@ export default function Restaurant() {
     <>
       <div className="rhead row between wrap"><div><h1>{detail.name}</h1><p className="muted">{detail.area} · {detail.cuisines.join(', ')}{detail.phone ? ` · ${detail.phone}` : ''} · listed on {detail.listings.length} provider(s)</p></div>{user && <button className="btn ghost" onClick={toggleSaved} disabled={saveBusy} aria-pressed={saved}>{saveBusy ? 'Saving…' : saved ? 'Saved ★' : 'Save restaurant ☆'}</button>}</div>
       {saveError && <div className="state error" role="alert">{saveError}</div>}
-      <div className="tabs" role="tablist">{(['compare', 'reputation', 'sources'] as const).map(item => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? 'on' : ''} onClick={() => setTab(item)}>{{ compare: 'Compare prices', reputation: 'Reputation', sources: 'Sources & freshness' }[item]}</button>)}</div>
+      <div className="tabs" role="tablist">{(['compare', 'reputation', 'sources'] as const).map(item => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? 'on' : ''} onClick={() => setView(current => ({ ...current, tab: item }))}>{{ compare: 'Compare prices', reputation: 'Reputation', sources: 'Sources & freshness' }[item]}</button>)}</div>
       {tab === 'reputation' && <ReputationPanel d={detail} />}
       {tab === 'sources' && <SourcesPanel d={detail} />}
       {tab === 'compare' && (
@@ -110,11 +139,11 @@ export default function Restaurant() {
           </aside>
           <section>
             <div className="controls">
-              <div className="chips">{PRIORITIES.map(([key, label]) => <button key={key} className={'chip' + (priority === key ? ' on' : '')} onClick={() => setPriority(key)}>{label}</button>)}</div>
-              <label className="muted">Max delivery time <input type="number" min={10} placeholder="any" value={maxEta} onChange={event => setMaxEta(event.target.value)} /> min</label>
+              <div className="chips">{PRIORITIES.map(([key, label]) => <button key={key} className={'chip' + (priority === key ? ' on' : '')} onClick={() => setView(current => ({ ...current, priority: key }))}>{label}</button>)}</div>
+              <label className="muted">Max delivery time <input type="number" min={10} placeholder="any" value={maxEta} onChange={event => setView(current => ({ ...current, maxEta: event.target.value }))} /> min</label>
             </div>
             {!compare && !busy && !compareErr && <div className="state">Add at least one item to compare providers.</div>}
-            {busy && !compare && <div className="state">Comparing…</div>}
+            {busy && !compare && <div className="state loading-state" role="status">Comparing providers…</div>}
             {compareErr && <div className="state error" role="alert">{compareErr}</div>}
             {compare && <div className="grid cards">{compare.options.map(option => <ProviderCard key={option.providerId} o={option} />)}</div>}
             {compare?.options.length === 0 && <div className="state">No provider can fulfil this basket within your limits.</div>}

@@ -4,6 +4,7 @@ import { api, inr } from '../api';
 import { useAuth } from '../AuthContext';
 import type { Detail, SearchResult } from '../types';
 import FriendBasketDemo from '../components/FriendBasketDemo';
+import { useSessionState } from '../hooks/useSessionState';
 
 interface Member { userId: string; name: string; role: 'organizer' | 'member'; addressConfirmed: boolean }
 interface CartItem { id: string; itemId: string; itemName: string; ownerId: string; ownerName: string; quantity: number; unitPricePaise?: number | null }
@@ -13,7 +14,7 @@ interface CartListEntry { id: string; restaurantName: string; state: string; mem
 
 export default function SharedCart() {
   const { user } = useAuth();
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useSessionState('foodlens.shared-cart.search.v1', '', value => typeof value === 'string' ? value : '');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [carts, setCarts] = useState<CartListEntry[]>([]);
   const [cart, setCart] = useState<SharedCartData | null>(null);

@@ -1,4 +1,11 @@
 let csrfToken: string | null = null;
+let activeApiRequests = 0;
+
+function reportApiProgress() {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('foodlens:api-progress', { detail: { pending: activeApiRequests } }));
+  }
+}
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) {
@@ -12,6 +19,9 @@ export function setCsrfToken(value: string | null) {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  activeApiRequests += 1;
+  reportApiProgress();
+  try {
   const headers = new Headers(init?.headers);
   if (init?.body != null && !headers.has("content-type")) headers.set("content-type", "application/json");
   const method = (init?.method || "GET").toUpperCase();
@@ -38,6 +48,10 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(message, response.status, code);
   }
   return body as T;
+  } finally {
+    activeApiRequests = Math.max(0, activeApiRequests - 1);
+    reportApiProgress();
+  }
 }
 
 export const inr = (n: number | null | undefined) =>
