@@ -7,6 +7,7 @@ import { sharedCartRouter } from "./shared-cart-routes.js";
 import { smartmealRouter } from "./smartmeal-routes.js";
 import { databaseConfigured, inTransaction, query } from "./db.js";
 import { configuredPaymentProvider, verifyRazorpayWebhook } from "./payment-provider.js";
+import { createDemoPaymentQr } from "./demo-payment-qr.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -96,7 +97,6 @@ app.use("/api/admin", authenticate, requireAdmin);
 // remains test-only because configuredPaymentProvider rejects all live keys.
 app.post("/api/demo-payments/qrs", authenticate, requireCsrf, async (req, res) => {
   const provider = configuredPaymentProvider();
-  if (!provider) return res.status(503).json({ error: { code: "TEST_PAYMENTS_UNCONFIGURED", message: "Per-person demo QRs require Razorpay test credentials and PAYMENT_ENV=test. Live payments are disabled." } });
   const participants = req.body?.participants;
   if (!Array.isArray(participants) || participants.length < 1 || participants.length > 3) {
     return res.status(400).json({ error: { code: "INVALID_DEMO_PARTICIPANTS", message: "Provide one to three demo participants." } });
@@ -109,6 +109,11 @@ app.post("/api/demo-payments/qrs", authenticate, requireCsrf, async (req, res) =
   const payments = [];
   for (const participant of participants as Array<{ id: string; name: string; amountPaise: number }>) {
     try {
+      if (!provider) {
+        const imageUrl = await createDemoPaymentQr(participant.id, participant.amountPaise);
+        payments.push({ participantId: participant.id, name: participant.name.trim(), amountPaise: participant.amountPaise, imageUrl, status: "demo", error: null });
+        continue;
+      }
       const qr = await provider.createSingleUseUpiQr({
         amountPaise: participant.amountPaise,
         description: `FoodLens demo share for ${participant.name.trim()}`,

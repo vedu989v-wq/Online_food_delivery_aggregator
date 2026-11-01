@@ -5,7 +5,9 @@ import { api, inr } from '../api';
 interface CheckoutItem { name: string; quantity: number; unitPricePaise: number }
 interface CheckoutParticipant { id: string; name: string; amountPaise: number; items: CheckoutItem[] }
 interface CheckoutState { restaurantName: string; providerName: string; address: string; participants: CheckoutParticipant[] }
-interface GeneratedQr { participantId: string; name: string; amountPaise: number; imageUrl: string; status: string; error?: string }
+interface GeneratedQr { participantId: string; name: string; amountPaise: number; imageUrl: string | null; status: 'created' | 'demo' | 'failed'; error?: string | null }
+
+const isQrReady = (payment: GeneratedQr) => (payment.status === 'created' || payment.status === 'demo') && Boolean(payment.imageUrl);
 
 export default function FriendBasketCheckout() {
   const location = useLocation();
@@ -21,7 +23,7 @@ export default function FriendBasketCheckout() {
   const checkoutData = checkout;
   const totalPaise = checkoutData.participants.reduce((sum, person) => sum + person.amountPaise, 0);
   async function generatePaymentQrs() {
-    const alreadyCreated = new Set(payments.filter(payment => payment.status === 'created').map(payment => payment.participantId));
+    const alreadyCreated = new Set(payments.filter(isQrReady).map(payment => payment.participantId));
     const missingParticipants = checkoutData.participants.filter(person => !alreadyCreated.has(person.id));
     if (!missingParticipants.length) return;
     setGenerating(true); setError('');
@@ -30,8 +32,8 @@ export default function FriendBasketCheckout() {
         method: 'POST',
         body: JSON.stringify({ participants: missingParticipants.map(({ id, name, amountPaise }) => ({ id, name, amountPaise })) }),
       });
-      setPayments(current => [...current.filter(payment => payment.status === 'created'), ...result.payments]);
-      const failures = result.payments.filter(payment => payment.status !== 'created');
+      setPayments(current => [...current.filter(isQrReady), ...result.payments]);
+      const failures = result.payments.filter(payment => !isQrReady(payment));
       if (failures.length) setError(`${failures.length} test QR${failures.length === 1 ? '' : 's'} could not be created. Retry for those participants after checking the test payment configuration.`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not generate payment QRs.');
@@ -49,14 +51,14 @@ export default function FriendBasketCheckout() {
         <p className="muted small">Charges are split by the selected food items. Delivery, tax and discounts are excluded in this friend demo.</p>
       </section>
       <section className="card"><span className="kicker">PAYMENT REQUESTS</span><h2>{checkout.participants.length} individual test QR{checkout.participants.length === 1 ? '' : 's'}</h2>
-        <p className="muted">Generate a separate fixed-amount Razorpay test QR for each participant. Only configured <code>rzp_test_</code> credentials are accepted; live payments are disabled.</p>
-        <button type="button" className="btn" disabled={generating || payments.length === checkout.participants.length && payments.every(payment => payment.status === 'created')} onClick={() => void generatePaymentQrs()}>{generating ? 'Generating test QRs…' : payments.length ? 'Retry failed QRs' : 'Generate payment QRs'}</button>
+        <p className="muted">Generate one QR per participant. When Razorpay test credentials are configured, these are test payment requests. Otherwise FoodLens creates local demo QRs that are explicitly not payable.</p>
+        <button type="button" className="btn" disabled={generating || checkout.participants.every(person => payments.some(payment => payment.participantId === person.id && isQrReady(payment)))} onClick={() => void generatePaymentQrs()}>{generating ? 'Generating QRs…' : payments.length ? 'Retry failed QRs' : 'Generate payment QRs'}</button>
         {error && <p className="state error" role="alert">{error}</p>}
         {payments.length > 0 && <div className="friend-checkout-qr-grid">{payments.map(payment => <article className="friend-checkout-qr" key={payment.participantId}>
-          {payment.status === 'created' && payment.imageUrl ? <img src={payment.imageUrl} alt={`Razorpay test payment QR for ${payment.name}`} /> : <div className="friend-checkout-qr-error">QR unavailable</div>}
-          <div><span className="kicker">RAZORPAY TEST QR</span><h3>{payment.name}</h3><strong>{inr(payment.amountPaise / 100)}</strong><p className="muted small">{payment.status === 'created' ? 'Fixed amount · test mode' : payment.error || 'Generation failed'}</p></div>
+          {isQrReady(payment) && payment.imageUrl ? <img src={payment.imageUrl} alt={`${payment.status === 'demo' ? 'Demo-only non-payable' : 'Razorpay test payment'} QR for ${payment.name}`} /> : <div className="friend-checkout-qr-error">QR unavailable</div>}
+          <div><span className="kicker">{payment.status === 'demo' ? 'DEMO QR · NOT PAYABLE' : 'RAZORPAY TEST QR'}</span><h3>{payment.name}</h3><strong>{inr(payment.amountPaise / 100)}</strong><p className="muted small">{payment.status === 'demo' ? 'Scannable demo label · cannot collect money' : payment.status === 'created' ? 'Fixed amount · Razorpay test mode' : payment.error || 'Generation failed'}</p></div>
         </article>)}</div>}
-        <p className="muted small">These are genuine Razorpay test-mode payment requests, if generated. They are not live charges and are not connected to a restaurant order.</p>
+        <p className="muted small">Razorpay test QRs are not live charges and are not connected to a restaurant order. Demo QRs contain a FoodLens demo label only and cannot accept payment.</p>
       </section>
     </div>
     <button type="button" className="btn ghost" onClick={() => navigate('/shared-cart', { state: { reopenFriendDemo: true } })}>Back to Basket Split</button>
