@@ -1,5 +1,4 @@
 import express, { type Request, type Response } from "express";
-import { randomUUID } from "node:crypto";
 import cors from "cors";
 import { authAllowedOrigins, authRouter, authenticate, requireAdmin, requireCsrf } from "./auth-routes.js";
 import { customerRouter } from "./customer-routes.js";
@@ -7,7 +6,7 @@ import { sharedCartRouter } from "./shared-cart-routes.js";
 import { smartmealRouter } from "./smartmeal-routes.js";
 import { databaseConfigured, inTransaction, query } from "./db.js";
 import { configuredPaymentProvider, verifyRazorpayWebhook } from "./payment-provider.js";
-import { createDemoPaymentQr } from "./demo-payment-qr.js";
+import { createParticipantQr } from "./demo-payment-qr.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -109,19 +108,10 @@ app.post("/api/demo-payments/qrs", authenticate, requireCsrf, async (req, res) =
   const payments = [];
   for (const participant of participants as Array<{ id: string; name: string; amountPaise: number }>) {
     try {
-      if (!provider) {
-        const imageUrl = await createDemoPaymentQr(participant.id, participant.amountPaise);
-        payments.push({ participantId: participant.id, name: participant.name.trim(), amountPaise: participant.amountPaise, imageUrl, status: "demo", error: null });
-        continue;
-      }
-      const qr = await provider.createSingleUseUpiQr({
-        amountPaise: participant.amountPaise,
-        description: `FoodLens demo share for ${participant.name.trim()}`,
-        paymentRequestId: randomUUID(),
-      });
-      payments.push({ participantId: participant.id, name: participant.name.trim(), amountPaise: qr.amountPaise, imageUrl: qr.imageUrl, status: "created" });
+      const qr = await createParticipantQr(provider, participant);
+      payments.push({ participantId: participant.id, name: participant.name.trim(), ...qr });
     } catch {
-      payments.push({ participantId: participant.id, name: participant.name.trim(), amountPaise: participant.amountPaise, imageUrl: null, status: "failed", error: "Test QR generation failed." });
+      payments.push({ participantId: participant.id, name: participant.name.trim(), amountPaise: participant.amountPaise, imageUrl: null, status: "failed", error: "QR image generation failed. Please retry." });
     }
   }
   return res.json({ payments });
