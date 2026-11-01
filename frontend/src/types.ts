@@ -108,6 +108,7 @@ export interface Recommendation {
   rating: number | null;
   ratingCount: number;
   score: number;
+  goalSuitability?: { score: number | null; mode: 'trained' | 'fallback' | 'unavailable'; reason: string };
   reasons: string[];
   factors: { factor: string; weight: number; value: number; known: boolean }[];
 }

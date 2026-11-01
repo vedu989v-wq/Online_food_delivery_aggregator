@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from "express";
+import { createHash } from "node:crypto";
 import cors from "cors";
 import { authAllowedOrigins, authRouter, authenticate, requireAdmin, requireCsrf } from "./auth-routes.js";
 import { customerRouter } from "./customer-routes.js";
@@ -18,6 +19,7 @@ const localBind = ["127.0.0.1", "::1", "localhost"].includes(host.toLowerCase())
 const adminMutationsEnabled = process.env.NODE_ENV !== "production"
   && process.env.ADMIN_DEMO_MODE === "true"
   && localBind;
+const smartMealEnrichmentLimits = new Map<string, { window: number; count: number }>();
 
 const allowedOrigins = authAllowedOrigins();
 app.use(cors({
@@ -179,6 +181,84 @@ app.post("/api/admin/review-queue/:id/decision", (req, res) => {
     return res.status(403).json({ error: { code: "ADMIN_DEMO_DISABLED", message: "Demo review decisions are disabled. Enable them only in local development." } });
   }
   return proxyPython(req, res, `/api/admin/review-queue/${encodeURIComponent(req.params.id)}/decision`, "POST");
+});
+async function enrichSmartMealItem(item: { dishKey: string; dishName: string; description: string }, token: string, force: boolean, actor: string) {
+  try {
+    const now = Date.now();
+    const previous = smartMealEnrichmentLimits.get(actor);
+    if (previous && now - previous.window < 60_000 && previous.count >= 5) return { status: 429, body: { error: { code: "ENRICHMENT_RATE_LIMIT", message: "Wait a minute before starting more enrichments." } } };
+    smartMealEnrichmentLimits.set(actor, !previous || now - previous.window >= 60_000 ? { window: now, count: 1 } : { ...previous, count: previous.count + 1 });
+    const { dishKey, dishName } = item;
+    const { description } = item;
+    const sourceHash = createHash("sha256").update(`${dishName.trim()}\n${description}\nsmartmeal-nutrition-v1`).digest("hex");
+    const cached = await query(`SELECT dish_key AS "itemId",dish_name AS "dishName",serving_size_g AS "servingSizeG",calories_kcal AS "caloriesKcal",protein_g AS "proteinG",carbohydrates_g AS "carbohydratesG",fat_g AS "fatG",fiber_g AS "fiberG",sodium_mg AS "sodiumMg",source_name AS "sourceName",source_reference AS "sourceReference",estimation_method AS "estimationMethod",confidence_level AS "confidenceLevel",verification_status AS "verificationStatus",nutrition_metadata AS "nutritionMetadata",review_status AS "reviewStatus" FROM nutrition_records WHERE dish_key=$1`, [dishKey]);
+    if (cached.rows[0] && cached.rows[0].verificationStatus !== "approximate") return { status: 409, body: { error: { code: "VERIFIED_NUTRITION_PROTECTED", message: "A documented nutrition record exists and cannot be replaced by a Gemini estimate." } } };
+    if (!force) {
+      if (cached.rows[0]?.reviewStatus === "rejected") return { status: 409, body: { error: { code: "ESTIMATE_PREVIOUSLY_REJECTED", message: "This estimate was rejected; explicitly set force=true to request another estimate." } } };
+      if (cached.rows[0]?.nutritionMetadata?.sourceHash === sourceHash) return { status: 200, body: { saved: true, cached: true, nutrition: cached.rows[0] } };
+    }
+    const pythonBase = (process.env.PYTHON_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+    const response = await fetch(`${pythonBase}/api/smartmeal/nutrition/enrich`, {
+      method: "POST", headers: { "content-type": "application/json", "x-smartmeal-token": token },
+      body: JSON.stringify({ dish_key: dishKey, dish_name: dishName.trim(), description }), signal: AbortSignal.timeout(20_000),
+    });
+    const estimate = await response.json().catch(() => null) as any;
+    if (!response.ok || !estimate || estimate.status !== "estimated") {
+      return { status: response.status === 429 ? 429 : 503, body: { error: { code: "ENRICHMENT_UNAVAILABLE", message: "The dish could not be estimated. No nutrition record was saved." }, result: estimate?.status === "unavailable" ? estimate : undefined } };
+    }
+    await query(`INSERT INTO nutrition_records(dish_key,dish_name,serving_size_g,calories_kcal,protein_g,carbohydrates_g,fat_g,fiber_g,sodium_mg,source_name,source_reference,estimation_method,confidence_level,verification_status,nutrition_metadata,source_menu_key,review_status,last_updated)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'approximate',$14::jsonb,$1,'pending',now())
+      ON CONFLICT(dish_key) DO UPDATE SET dish_name=excluded.dish_name,serving_size_g=excluded.serving_size_g,calories_kcal=excluded.calories_kcal,protein_g=excluded.protein_g,carbohydrates_g=excluded.carbohydrates_g,fat_g=excluded.fat_g,fiber_g=excluded.fiber_g,sodium_mg=excluded.sodium_mg,source_name=excluded.source_name,source_reference=excluded.source_reference,estimation_method=excluded.estimation_method,confidence_level=excluded.confidence_level,verification_status='approximate',nutrition_metadata=excluded.nutrition_metadata,source_menu_key=excluded.source_menu_key,review_status='pending',reviewed_by=NULL,reviewed_at=NULL,last_updated=now()`,
+    [dishKey, estimate.dish_name, estimate.serving_size_g, estimate.calories_kcal, estimate.protein_g, estimate.carbohydrates_g, estimate.fat_g, estimate.fiber_g, estimate.sodium_mg,
+      "Gemini-assisted estimate", `FoodLens menu key ${dishKey}`, "Gemini ingredient and portion estimate; not independently verified", estimate.confidence === "medium" ? "medium" : "low", JSON.stringify({ ingredients: estimate.ingredients, assumptions: estimate.assumptions, uncertainties: estimate.uncertainties, model: estimate.model, promptVersion: estimate.prompt_version, sourceHash })]);
+    return { status: 200, body: { saved: true, reviewStatus: "pending", nutrition: estimate } };
+  } catch {
+    return { status: 503, body: { error: { code: "ENRICHMENT_UNAVAILABLE", message: "Enrichment failed and no nutrition record was saved." } } };
+  }
+}
+app.post("/api/admin/smartmeal/nutrition/enrich", requireCsrf, async (req, res) => {
+  const { dishKey, dishName } = req.body ?? {};
+  const description = req.body?.description ?? "";
+  if (typeof dishKey !== "string" || !/^[a-zA-Z0-9_.:-]{1,160}$/.test(dishKey) || typeof dishName !== "string" || !dishName.trim() || dishName.length > 160 || typeof description !== "string" || description.length > 800) {
+    return res.status(400).json({ error: { code: "INVALID_NUTRITION_ITEM", message: "Provide a valid menu key, dish name, and description." } });
+  }
+  const token = process.env.SMARTMEAL_INTERNAL_TOKEN;
+  if (!token || !databaseConfigured()) return res.status(503).json({ error: { code: "SMARTMEAL_NOT_CONFIGURED", message: "SmartMeal enrichment requires its private token and database." } });
+  const result = await enrichSmartMealItem({ dishKey, dishName: dishName.trim(), description }, token, req.body?.force === true, (req as any).auth?.id ?? req.ip ?? "admin");
+  return res.status(result.status).json(result.body);
+});
+app.post("/api/admin/smartmeal/nutrition/enrich-batch", requireCsrf, async (req, res) => {
+  const items = req.body?.items;
+  if (!Array.isArray(items) || items.length < 1 || items.length > 5 || items.some((item: any) => !item || typeof item.dishKey !== "string" || !/^[a-zA-Z0-9_.:-]{1,160}$/.test(item.dishKey) || typeof item.dishName !== "string" || !item.dishName.trim() || item.dishName.length > 160 || (item.description != null && (typeof item.description !== "string" || item.description.length > 800))) || new Set(items.map((item: any) => item.dishKey)).size !== items.length) {
+    return res.status(400).json({ error: { code: "INVALID_NUTRITION_BATCH", message: "Provide 1–5 unique menu items with valid names and descriptions." } });
+  }
+  const token = process.env.SMARTMEAL_INTERNAL_TOKEN;
+  if (!token || !databaseConfigured()) return res.status(503).json({ error: { code: "SMARTMEAL_NOT_CONFIGURED", message: "SmartMeal enrichment requires its private token and database." } });
+  const actor = (req as any).auth?.id ?? req.ip ?? "admin";
+  const results = [];
+  for (const item of items as Array<{ dishKey: string; dishName: string; description?: string }>) {
+    const result = await enrichSmartMealItem({ dishKey: item.dishKey, dishName: item.dishName.trim(), description: item.description ?? "" }, token, req.body?.force === true, actor);
+    results.push({ dishKey: item.dishKey, status: result.status, ...result.body });
+    if (result.status === 429) break;
+  }
+  return res.status(results.some(result => result.status >= 500) ? 207 : 200).json({ results });
+});
+app.get("/api/admin/smartmeal/nutrition/pending", async (_req, res) => {
+  try {
+    const pending = await query(`SELECT dish_key AS "itemId",dish_name AS "dishName",serving_size_g AS "servingSizeG",calories_kcal AS "caloriesKcal",protein_g AS "proteinG",carbohydrates_g AS "carbohydratesG",fat_g AS "fatG",fiber_g AS "fiberG",sodium_mg AS "sodiumMg",source_name AS "sourceName",source_reference AS "sourceReference",confidence_level AS "confidenceLevel",nutrition_metadata AS "nutritionMetadata",last_updated AS "createdAt" FROM nutrition_records WHERE review_status='pending' ORDER BY last_updated LIMIT 100`);
+    return res.json({ records: pending.rows });
+  } catch { return res.status(503).json({ error: { code: "NUTRITION_REVIEW_UNAVAILABLE", message: "Pending nutrition estimates could not be loaded." } }); }
+});
+app.post("/api/admin/smartmeal/nutrition/:dishKey/review", requireCsrf, async (req, res) => {
+  const dishKey = req.params.dishKey;
+  const decision = req.body?.decision;
+  if (typeof dishKey !== "string" || !/^[a-zA-Z0-9_.:-]{1,160}$/.test(dishKey) || !["approve", "reject"].includes(decision)) return res.status(400).json({ error: { code: "INVALID_NUTRITION_REVIEW", message: "Choose approve or reject for a valid dish key." } });
+  try {
+    const reviewStatus = decision === "approve" ? "approved" : "rejected";
+    const result = await query(`UPDATE nutrition_records SET review_status=$2,reviewed_by=$3,reviewed_at=now(),last_updated=now() WHERE dish_key=$1 AND verification_status='approximate' AND review_status='pending' RETURNING dish_key`, [dishKey, reviewStatus, (req as any).auth.id]);
+    if (!result.rowCount) return res.status(404).json({ error: { code: "PENDING_ESTIMATE_NOT_FOUND", message: "No pending Gemini estimate exists for this dish." } });
+    return res.json({ dishKey, reviewStatus });
+  } catch { return res.status(503).json({ error: { code: "NUTRITION_REVIEW_UNAVAILABLE", message: "The nutrition review could not be saved." } }); }
 });
 
 app.use((_req, res) => res.status(404).json({ error: { code: "NOT_FOUND", message: "Route not found" } }));

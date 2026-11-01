@@ -6,6 +6,7 @@ const router = Router();
 const priorities = new Set(["value", "cheapest", "fastest", "reliable", "rated"]);
 const eventTypes = new Set(["restaurant_viewed", "restaurant_saved", "comparison_requested", "recommendation_selected", "filter_selected"]);
 const restaurantIdPattern = /^[a-zA-Z0-9_-]{1,64}$/;
+const smartMealChatLimits = new Map<string, { window: number; count: number }>();
 
 function fail(res: Response, status: number, code: string, message: string) {
   return res.status(status).json({ error: { code, message } });
@@ -172,7 +173,7 @@ router.get("/recommendations", (req: AuthenticatedRequest, res, next) => proxyRe
 
 router.get("/health-profile", async (req: AuthenticatedRequest, res) => {
   try {
-    const result = await query("SELECT consented,age_years AS \"ageYears\",height_cm AS \"heightCm\",weight_kg AS \"weightKg\",activity_level AS \"activityLevel\",goal,dietary_preference AS \"dietaryPreference\",calorie_target AS \"calorieTarget\",protein_target_g AS \"proteinTargetG\",updated_at AS \"updatedAt\" FROM smartmeal_health_profiles WHERE user_id=$1", [req.auth!.id]);
+    const result = await query("SELECT consented,age_years AS \"ageYears\",height_cm AS \"heightCm\",weight_kg AS \"weightKg\",target_weight_kg AS \"targetWeightKg\",exercise_days_per_week AS \"exerciseDaysPerWeek\",activity_level AS \"activityLevel\",goal,dietary_preference AS \"dietaryPreference\",calorie_target AS \"calorieTarget\",protein_target_g AS \"proteinTargetG\",updated_at AS \"updatedAt\" FROM smartmeal_health_profiles WHERE user_id=$1", [req.auth!.id]);
     return res.json({ profile: result.rows[0] ?? { consented: false } });
   } catch { return dbFail(res); }
 });
@@ -184,6 +185,8 @@ router.put("/health-profile", requireCsrf, async (req: AuthenticatedRequest, res
   const age = consented ? numberOrNull(body.ageYears) : null;
   const height = consented ? numberOrNull(body.heightCm) : null;
   const weight = consented ? numberOrNull(body.weightKg) : null;
+  const targetWeight = consented ? numberOrNull(body.targetWeightKg) : null;
+  const exerciseDays = consented ? numberOrNull(body.exerciseDaysPerWeek) : null;
   const calories = consented ? numberOrNull(body.calorieTarget) : null;
   const protein = consented ? numberOrNull(body.proteinTargetG) : null;
   const activity = consented ? body.activityLevel ?? null : null;
@@ -192,22 +195,78 @@ router.put("/health-profile", requireCsrf, async (req: AuthenticatedRequest, res
   if (consented && ((age !== null && (!Number.isInteger(age) || age < 18 || age > 120))
     || (height !== null && (!Number.isFinite(height) || height < 100 || height > 250))
     || (weight !== null && (!Number.isFinite(weight) || weight < 25 || weight > 350))
+    || (targetWeight !== null && (!Number.isFinite(targetWeight) || targetWeight < 25 || targetWeight > 350))
+    || (exerciseDays !== null && (!Number.isInteger(exerciseDays) || exerciseDays < 0 || exerciseDays > 14))
     || (calories !== null && (!Number.isInteger(calories) || calories < 500 || calories > 10000))
     || (protein !== null && (!Number.isFinite(protein) || protein < 0 || protein > 500))
     || (activity !== null && !["sedentary","light","moderate","active","very_active"].includes(activity))
-    || (goal !== null && !["maintenance","balanced","muscle_gain","weight_loss","high_protein"].includes(goal))
+    || (goal !== null && !["weight_gain","maintenance","balanced","muscle_gain","weight_loss","high_protein"].includes(goal))
     || (body.dietaryPreference != null && !diet))) return fail(res, 400, "INVALID_HEALTH_PROFILE", "Check the optional health profile values.");
   try {
-    await query(`INSERT INTO smartmeal_health_profiles(user_id,consented,age_years,height_cm,weight_kg,activity_level,goal,dietary_preference,calorie_target,protein_target_g,updated_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()) ON CONFLICT(user_id) DO UPDATE SET consented=excluded.consented,age_years=excluded.age_years,height_cm=excluded.height_cm,weight_kg=excluded.weight_kg,activity_level=excluded.activity_level,goal=excluded.goal,dietary_preference=excluded.dietary_preference,calorie_target=excluded.calorie_target,protein_target_g=excluded.protein_target_g,updated_at=now()`,
-    [req.auth!.id, consented, age, height, weight, activity, goal, diet, calories, protein]);
-    return res.json({ saved: true, profile: { consented, ageYears: age, heightCm: height, weightKg: weight, activityLevel: activity, goal, dietaryPreference: diet, calorieTarget: calories, proteinTargetG: protein } });
+    await query(`INSERT INTO smartmeal_health_profiles(user_id,consented,age_years,height_cm,weight_kg,target_weight_kg,exercise_days_per_week,activity_level,goal,dietary_preference,calorie_target,protein_target_g,updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now()) ON CONFLICT(user_id) DO UPDATE SET consented=excluded.consented,age_years=excluded.age_years,height_cm=excluded.height_cm,weight_kg=excluded.weight_kg,target_weight_kg=excluded.target_weight_kg,exercise_days_per_week=excluded.exercise_days_per_week,activity_level=excluded.activity_level,goal=excluded.goal,dietary_preference=excluded.dietary_preference,calorie_target=excluded.calorie_target,protein_target_g=excluded.protein_target_g,updated_at=now()`,
+    [req.auth!.id, consented, age, height, weight, targetWeight, exerciseDays, activity, goal, diet, calories, protein]);
+    return res.json({ saved: true, profile: { consented, ageYears: age, heightCm: height, weightKg: weight, targetWeightKg: targetWeight, exerciseDaysPerWeek: exerciseDays, activityLevel: activity, goal, dietaryPreference: diet, calorieTarget: calories, proteinTargetG: protein } });
   } catch { return dbFail(res); }
 });
 
 router.delete("/health-profile", requireCsrf, async (req: AuthenticatedRequest, res) => {
   try { await query("DELETE FROM smartmeal_health_profiles WHERE user_id=$1", [req.auth!.id]); return res.status(204).end(); }
   catch { return dbFail(res); }
+});
+
+router.post("/smartmeal-chat", requireCsrf, async (req: AuthenticatedRequest, res) => {
+  const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+  if (!message || message.length > 1000) return fail(res, 400, "INVALID_SMARTMEAL_MESSAGE", "Enter a message up to 1,000 characters.");
+  const history = Array.isArray(req.body?.history) ? req.body.history.slice(-8).filter((turn: any) => turn && ["user", "assistant"].includes(turn.role) && typeof turn.content === "string" && turn.content.length <= 1200).map((turn: any) => ({ role: turn.role, content: turn.content })) : [];
+  const now = Date.now();
+  const prior = smartMealChatLimits.get(req.auth!.id);
+  if (prior && now - prior.window < 60_000 && prior.count >= 8) return fail(res, 429, "SMARTMEAL_RATE_LIMIT", "Please wait a moment before sending another SmartMeal message.");
+  smartMealChatLimits.set(req.auth!.id, !prior || now - prior.window >= 60_000 ? { window: now, count: 1 } : { ...prior, count: prior.count + 1 });
+  try {
+    const profileResult = await query(`SELECT consented,age_years AS "age_years",height_cm AS "height_cm",weight_kg AS "weight_kg",target_weight_kg AS "target_weight_kg",exercise_days_per_week AS "exercise_days_per_week",activity_level AS "activity_level",goal,dietary_preference AS "dietary_preference",calorie_target AS "calorie_target",protein_target_g AS "protein_target_g" FROM smartmeal_health_profiles WHERE user_id=$1`, [req.auth!.id]);
+    const savedHealth = req.body?.useSavedProfile === true && profileResult.rows[0]?.consented ? profileResult.rows[0] : {};
+    const profile = { ...savedHealth,
+      budget_per_person: req.auth!.budgetPerPerson,
+      dietary_preference: savedHealth.dietary_preference ?? (req.auth!.vegetarianOnly ? "vegetarian" : null),
+      cuisine: req.auth!.preferredCuisines[0] ?? null,
+      city: req.auth!.city, area: req.auth!.area,
+    };
+    const token = process.env.SMARTMEAL_INTERNAL_TOKEN;
+    if (!token) return fail(res, 503, "SMARTMEAL_NOT_CONFIGURED", "The private SmartMeal service is not configured.");
+    const pythonBase = (process.env.PYTHON_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+    const response = await fetch(`${pythonBase}/api/smartmeal/chat`, {
+      method: "POST", headers: { "content-type": "application/json", "x-smartmeal-token": token },
+      body: JSON.stringify({ message, history, profile }), signal: AbortSignal.timeout(30_000),
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok || !body || !Array.isArray(body.recommendations)) return fail(res, response.status === 429 ? 429 : 503, "SMARTMEAL_UNAVAILABLE", "SmartMeal is temporarily unavailable. Your profile remains saved; please retry shortly.");
+    const itemIds = [...new Set(body.recommendations.map((item: any) => item.itemId).filter((id: unknown): id is string => typeof id === "string"))];
+    const nutritionResult = itemIds.length ? await query(`SELECT dish_key AS "itemId",dish_name AS "dishName",serving_size_g AS "servingSizeG",calories_kcal AS "caloriesKcal",protein_g AS "proteinG",carbohydrates_g AS "carbohydratesG",fat_g AS "fatG",fiber_g AS "fiberG",sodium_mg AS "sodiumMg",source_name AS "sourceName",source_reference AS "sourceReference",estimation_method AS "estimationMethod",confidence_level AS "confidenceLevel",verification_status AS "verificationStatus",nutrition_metadata AS "nutritionMetadata",review_status AS "reviewStatus" FROM nutrition_records WHERE dish_key=ANY($1::text[]) AND review_status<>'rejected'`, [itemIds]) : { rows: [] };
+    const nutritionById = Object.fromEntries(nutritionResult.rows.map((row: any) => [row.itemId, row]));
+    const rankResponse = await fetch(`${pythonBase}/api/smartmeal/rank`, {
+      method: "POST", headers: { "content-type": "application/json", "x-smartmeal-token": token },
+      body: JSON.stringify({ profile, requirements: body.requirements, recommendations: body.recommendations, nutrition_by_item: Object.fromEntries(Object.entries(nutritionById).filter(([, row]: [string, any]) => row.reviewStatus === "approved").map(([key, row]: [string, any]) => [key, { caloriesKcal: row.caloriesKcal, proteinG: row.proteinG, verificationStatus: row.verificationStatus }])) }),
+      signal: AbortSignal.timeout(5000),
+    });
+    const ranked = await rankResponse.json().catch(() => null) as any;
+    if (!rankResponse.ok || !Array.isArray(ranked?.recommendations)) return fail(res, 503, "SMARTMEAL_UNAVAILABLE", "Goal ranking is temporarily unavailable. Please retry shortly.");
+    const recommendations = ranked.recommendations.map((item: any) => ({ ...item, nutrition: nutritionById[item.itemId] ?? { status: "unavailable", reason: "No documented dish-specific nutrition record is available." } }));
+    let assistantMessage = body.assistantMessage;
+    if (recommendations.length && !body.intent?.requires_clinical_review && !body.intent?.requires_follow_up && !["nutrition_question", "general"].includes(body.intent?.intent)) {
+      try {
+        const explainResponse = await fetch(`${pythonBase}/api/smartmeal/explain`, {
+          method: "POST", headers: { "content-type": "application/json", "x-smartmeal-token": token },
+          body: JSON.stringify({ message, requirements: body.requirements, recommendations }), signal: AbortSignal.timeout(10_000),
+        });
+        const explained = await explainResponse.json().catch(() => null) as any;
+        if (explainResponse.ok && typeof explained?.assistantMessage === "string") assistantMessage = explained.assistantMessage;
+      } catch { /* Keep the safe deterministic response returned by the Python matching path. */ }
+    }
+    return res.json({ ...body, assistantMessage, recommendations, model: ranked.goalModel });
+  } catch {
+    return fail(res, 503, "SMARTMEAL_UNAVAILABLE", "SmartMeal is temporarily unavailable. Please retry shortly.");
+  }
 });
 
 router.post("/interactions", requireCsrf, async (req: AuthenticatedRequest, res) => {

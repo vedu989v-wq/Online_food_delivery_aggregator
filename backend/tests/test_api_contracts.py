@@ -36,6 +36,43 @@ def test_meta_returns_frontend_contract(client):
     assert "South Indian" in body["cuisines"]
 
 
+def test_smartmeal_private_chat_requires_internal_token(client, monkeypatch):
+    monkeypatch.setenv("SMARTMEAL_INTERNAL_TOKEN", "test-secret")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    denied = client.post("/api/smartmeal/chat", json={"message": "vegetarian meal under ₹250"})
+    assert denied.status_code == 503
+    response = client.post("/api/smartmeal/chat", headers={"x-smartmeal-token": "test-secret"},
+                           json={"message": "vegetarian meal under ₹250"})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["mode"] == "fallback"
+    assert result["intent"]["budget_per_meal"] == 250
+    assert "recommendations" in result and "limitations" in result
+    assert "Gemini is unavailable" in result["assistantMessage"] or result["total"] > 0
+
+
+def test_smartmeal_rank_requires_internal_token_and_surfaces_unavailable_nutrition(client, monkeypatch):
+    monkeypatch.setenv("SMARTMEAL_INTERNAL_TOKEN", "test-secret")
+    payload = {"profile": {}, "requirements": {}, "recommendations": [{"itemId": "dish", "score": 50}], "nutrition_by_item": {}}
+    assert client.post("/api/smartmeal/rank", json=payload).status_code == 503
+    response = client.post("/api/smartmeal/rank", headers={"x-smartmeal-token": "test-secret"}, json=payload)
+    assert response.status_code == 200
+    assert response.json()["recommendations"][0]["goalSuitability"]["mode"] == "unavailable"
+
+
+def test_smartmeal_explanation_is_private_and_uses_deterministic_fallback(client, monkeypatch):
+    monkeypatch.setenv("SMARTMEAL_INTERNAL_TOKEN", "test-secret")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    payload = {"message": "Why this dish?", "requirements": {}, "recommendations": [
+        {"itemName": "Known dish", "restaurantName": "Known restaurant", "unitPrice": 150, "score": 80,
+         "reasons": ["₹150 listed price"], "nutrition": {"reviewStatus": "pending", "caloriesKcal": 500}}
+    ]}
+    assert client.post("/api/smartmeal/explain", json=payload).status_code == 503
+    response = client.post("/api/smartmeal/explain", headers={"x-smartmeal-token": "test-secret"}, json=payload)
+    assert response.status_code == 200
+    assert "FoodLens's current dataset" in response.json()["assistantMessage"]
+
+
 def test_sentiment_scores_shrink_sparse_feedback_toward_neutral():
     one = main._sentiment_aggregate(pd.DataFrame({"food_sentiment": ["positive"]}), "food_sentiment")
     three = main._sentiment_aggregate(pd.DataFrame({"food_sentiment": ["positive", "positive", "positive"]}), "food_sentiment")
