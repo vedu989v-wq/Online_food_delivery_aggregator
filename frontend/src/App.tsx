@@ -107,7 +107,7 @@ function AppShell() {
     </header>
 
     <main aria-busy={pendingApiRequests > 0}>
-      {down && <div className="state error" role="alert">The application API is unavailable. If Render services have gone idle, open the gateway health endpoint, wait until it reports <code>status: ok</code>, then retry. <a className="btn ghost" href={import.meta.env.VITE_API_WAKE_URL || "https://foodlens-api-yzy1.onrender.com/api/health"} target="_blank" rel="noreferrer">Wake backend services</a> <button className="btn ghost" onClick={() => setRetryCount(count => count + 1)}>Retry connection</button></div>}
+      {down && <div className="state error" role="alert">The application API is unavailable. If the free Python service has gone idle, open its health endpoint, wait until it reports <code>status: ok</code>, then return here and retry. <a className="btn ghost" href={import.meta.env.VITE_PYTHON_WAKE_URL || "https://foodlens-python-api.onrender.com/api/health"} target="_blank" rel="noreferrer">Wake Python service</a> <button className="btn ghost" onClick={() => setRetryCount(count => count + 1)}>Retry connection</button></div>}
       {logoutError && <div className="state error" role="alert">{logoutError}</div>}
       <div className="route-stage" key={location.pathname}>
       <Routes location={location}>
